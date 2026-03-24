@@ -1,0 +1,3 @@
+-keep class com.doridian.wsvpn.protocol.** { *; }
+-keepattributes Signature
+-dontwarn okhttp3.**
