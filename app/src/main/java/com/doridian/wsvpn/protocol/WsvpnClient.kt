@@ -4,6 +4,7 @@ import android.util.Log
 import okhttp3.*
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
+import java.net.InetAddress
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.CountDownLatch
@@ -71,6 +72,15 @@ class WsvpnClient(
     }
 
     fun connect() {
+        if (config.serverUrl.isBlank()) {
+            listener.onError("Server URL is empty")
+            return
+        }
+        if (!config.serverUrl.startsWith("ws://") && !config.serverUrl.startsWith("wss://")) {
+            listener.onError("Server URL must start with ws:// or wss://")
+            return
+        }
+
         val requestBuilder = Request.Builder()
             .url(config.serverUrl)
             .header("User-Agent", APP_VERSION)
@@ -120,7 +130,10 @@ class WsvpnClient(
             "set_mtu" -> handleSetMtu(cmd)
             "reply" -> handleReply(cmd)
             "message" -> handleMessage(cmd)
-            else -> Log.w(TAG, "Unknown command: ${cmd.command}")
+            else -> {
+                Log.w(TAG, "Unknown command: ${cmd.command}")
+                sendCommand(WsvpnCommand.reply(cmd.id, "Unknown command: ${cmd.command}"))
+            }
         }
     }
 
@@ -145,7 +158,46 @@ class WsvpnClient(
         Log.i(TAG, "Init: mode=${params.mode}, ip=${params.ipAddress}, mtu=${params.mtu}")
 
         if (params.mode != "TUN") {
+            sendCommand(WsvpnCommand.reply(cmd.id, "Unsupported mode: ${params.mode}"))
             listener.onError("Unsupported mode: ${params.mode}. Only TUN is supported on Android.")
+            disconnect()
+            return
+        }
+
+        // Validate IP address format
+        if (params.ipAddress.isBlank()) {
+            sendCommand(WsvpnCommand.reply(cmd.id, "Empty IP address"))
+            listener.onError("Server sent empty IP address")
+            disconnect()
+            return
+        }
+        val ipParts = params.ipAddress.split("/")
+        if (ipParts.size != 2) {
+            sendCommand(WsvpnCommand.reply(cmd.id, "Invalid IP address format"))
+            listener.onError("Invalid IP address format: ${params.ipAddress} (expected CIDR notation)")
+            disconnect()
+            return
+        }
+        try {
+            InetAddress.getByName(ipParts[0])
+        } catch (e: Exception) {
+            sendCommand(WsvpnCommand.reply(cmd.id, "Invalid IP address"))
+            listener.onError("Invalid IP address: ${ipParts[0]}")
+            disconnect()
+            return
+        }
+        val prefixLen = ipParts[1].toIntOrNull()
+        if (prefixLen == null || prefixLen < 0 || prefixLen > 32) {
+            sendCommand(WsvpnCommand.reply(cmd.id, "Invalid prefix length"))
+            listener.onError("Invalid prefix length: ${ipParts[1]}")
+            disconnect()
+            return
+        }
+
+        // Validate MTU
+        if (params.mtu < 576 || params.mtu > 65535) {
+            sendCommand(WsvpnCommand.reply(cmd.id, "MTU out of range"))
+            listener.onError("MTU out of valid range (576-65535): ${params.mtu}")
             disconnect()
             return
         }
@@ -167,6 +219,28 @@ class WsvpnClient(
     private fun handleAddRoute(cmd: WsvpnCommand) {
         val params = AddRouteParameters.fromJsonObject(cmd.parameters)
         Log.i(TAG, "Add route: ${params.route}")
+
+        // Validate route format (CIDR)
+        val routeParts = params.route.split("/")
+        if (routeParts.size != 2) {
+            Log.w(TAG, "Invalid route format, ignoring: ${params.route}")
+            sendCommand(WsvpnCommand.reply(cmd.id, "Invalid route format"))
+            return
+        }
+        try {
+            InetAddress.getByName(routeParts[0])
+        } catch (e: Exception) {
+            Log.w(TAG, "Invalid route address, ignoring: ${params.route}")
+            sendCommand(WsvpnCommand.reply(cmd.id, "Invalid route address"))
+            return
+        }
+        val routePrefix = routeParts[1].toIntOrNull()
+        if (routePrefix == null || routePrefix < 0 || routePrefix > 32) {
+            Log.w(TAG, "Invalid route prefix, ignoring: ${params.route}")
+            sendCommand(WsvpnCommand.reply(cmd.id, "Invalid route prefix"))
+            return
+        }
+
         listener.onRouteAdded(params.route)
         sendCommand(WsvpnCommand.reply(cmd.id))
     }
@@ -174,6 +248,13 @@ class WsvpnClient(
     private fun handleSetMtu(cmd: WsvpnCommand) {
         val params = SetMtuParameters.fromJsonObject(cmd.parameters)
         Log.i(TAG, "Set MTU: ${params.mtu}")
+
+        if (params.mtu < 576 || params.mtu > 65535) {
+            Log.w(TAG, "MTU out of range, ignoring: ${params.mtu}")
+            sendCommand(WsvpnCommand.reply(cmd.id, "MTU out of range"))
+            return
+        }
+
         negotiatedMtu = params.mtu
         listener.onMtuChanged(params.mtu)
         sendCommand(WsvpnCommand.reply(cmd.id))
@@ -182,8 +263,14 @@ class WsvpnClient(
     private fun handleReply(cmd: WsvpnCommand) {
         val error = cmd.parameters.get("error")?.asString ?: ""
         if (error.isNotEmpty()) {
-            Log.w(TAG, "Reply error for ${cmd.id}: $error")
+            Log.e(TAG, "Reply error for ${cmd.id}: $error")
             replyErrors[cmd.id] = error
+            // If the server rejects our version, disconnect
+            if (!initialized) {
+                listener.onError("Server rejected handshake: $error")
+                disconnect()
+                return
+            }
         }
         pendingReplies[cmd.id]?.countDown()
     }
