@@ -141,9 +141,10 @@ class WsvpnService : VpnService() {
             }
 
             override fun onDisconnected(reason: String) {
+                val wasError = currentState is VpnState.Error
                 updateState(VpnState.Disconnected(reason))
                 val prof = profile
-                if (prof?.autoReconnect == true) {
+                if (prof?.autoReconnect == true && !wasError) {
                     scope.launch {
                         delay(3000)
                         if (currentState is VpnState.Disconnected) {

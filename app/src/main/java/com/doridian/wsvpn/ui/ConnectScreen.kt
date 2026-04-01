@@ -164,21 +164,21 @@ fun ConnectScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(56.dp),
-            enabled = !isConnecting && state.profile.serverUrl.isNotBlank(),
-            colors = if (isConnected) {
+            enabled = (isConnected || isConnecting) || state.profile.serverUrl.isNotBlank(),
+            colors = if (isConnected || isConnecting) {
                 ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
             } else {
                 ButtonDefaults.buttonColors()
             }
         ) {
             Icon(
-                imageVector = if (isConnected) Icons.Default.LinkOff else Icons.Default.Link,
+                imageVector = if (isConnected || isConnecting) Icons.Default.LinkOff else Icons.Default.Link,
                 contentDescription = null
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = when {
-                    isConnecting -> "Connecting..."
+                    isConnecting -> "Cancel"
                     isConnected -> "Disconnect"
                     else -> "Connect"
                 },

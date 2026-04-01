@@ -47,6 +47,7 @@ class WsvpnClient(
     private val replyErrors = ConcurrentHashMap<String, String>()
     @Volatile private var connected = false
     @Volatile private var initialized = false
+    private var handshakeTimer: java.util.Timer? = null
 
     init {
         val builder = OkHttpClient.Builder()
@@ -92,10 +93,27 @@ class WsvpnClient(
         }
 
         val request = requestBuilder.build()
+
+        // Start connection timeout (covers TCP + HTTP upgrade + handshake)
+        handshakeTimer?.cancel()
+        handshakeTimer = java.util.Timer().apply {
+            schedule(object : java.util.TimerTask() {
+                override fun run() {
+                    if (!initialized) {
+                        Log.w(TAG, "Connection timeout")
+                        listener.onError("Connection timed out")
+                        disconnect()
+                    }
+                }
+            }, 15000)
+        }
+
         webSocket = client.newWebSocket(request, WsvpnWebSocketListener())
     }
 
     fun disconnect() {
+        handshakeTimer?.cancel()
+        handshakeTimer = null
         connected = false
         initialized = false
         webSocket?.close(1000, "Client disconnect")
@@ -209,6 +227,9 @@ class WsvpnClient(
             defragmenter = PacketDefragmenter()
         }
 
+        handshakeTimer?.cancel()
+        handshakeTimer = null
+
         initialized = true
         listener.onInitReceived(params)
 
@@ -282,7 +303,14 @@ class WsvpnClient(
 
     private inner class WsvpnWebSocketListener : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            Log.i(TAG, "WebSocket connected")
+            Log.i(TAG, "WebSocket connected (HTTP ${response.code})")
+
+            // Check for auth failure
+            if (response.code == 401 || response.code == 403) {
+                listener.onError("Authentication failed (HTTP ${response.code})")
+                disconnect()
+                return
+            }
 
             // Check command serialization header
             val serialization = response.header("Command-Serialization")
@@ -333,17 +361,26 @@ class WsvpnClient(
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             Log.i(TAG, "WebSocket closed: code=$code reason=$reason")
+            handshakeTimer?.cancel()
+            handshakeTimer = null
             connected = false
             initialized = false
             listener.onDisconnected(reason.ifEmpty { "Connection closed (code=$code)" })
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            Log.e(TAG, "WebSocket failure", t)
+            Log.e(TAG, "WebSocket failure (HTTP ${response?.code})", t)
+            handshakeTimer?.cancel()
+            handshakeTimer = null
             connected = false
             initialized = false
-            listener.onError(t.message ?: "Connection failed")
-            listener.onDisconnected(t.message ?: "Connection failed")
+            val errorMsg = when (response?.code) {
+                401 -> "Authentication failed: invalid credentials"
+                403 -> "Authentication failed: access denied"
+                else -> t.message ?: "Connection failed"
+            }
+            listener.onError(errorMsg)
+            listener.onDisconnected(errorMsg)
         }
     }
 }
