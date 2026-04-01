@@ -1,0 +1,79 @@
+tunnel:
+  mtu: 1420
+  subnet: 192.168.3.0/24 # Server will pick the first host from this, and assign others to clients in order
+  # To enable internet access for VPN clients, run on the server:
+  #   sysctl -w net.ipv4.ip_forward=1
+  #   iptables -t nat -A POSTROUTING -s 192.168.3.0/24 ! -d 192.168.3.0/24 -j SNAT --to <SERVER_PUBLIC_IP>
+  mode: TUN # TUN or TAP
+
+  # Below settings are only effective when one-interface-per-connection is false/off
+  # If you use one-interface-per-connection, use your OS firewall to regulate packet flow
+  allow-client-to-client: false # Allow clients to talk to other clients on the same server
+  allow-ip-spoofing: false # TAP only: Allow clients to use any IP address and not just the assigned one (on TUN IPs are always enforced)
+  allow-mac-changing: true # TAP only: Allow clients to change the MAC address(es) they use on the interface
+  allowed-macs-per-connection: 1 # TAP only: Allow multiple MAC addresses per connection
+  allow-unknown-ether-types: false # TAP only: Allow unknown ether types (Anything other than ARP, IPv4)
+  # Above settings are only effective when one-interface-per-connection is false/off
+
+  features:
+    fragmentation: true # Enable packet fragmentation (default enabled), required for MTU > 1216 in WebTransport
+  ip-config:
+    local: true # Configure local interface automatically
+    remote: true # Send configuration data to clients for their interfaces
+  ping:
+    interval: 25s
+    timeout: 5s
+
+interface:
+  name: "" # Name of the interface to use, will be used as a prefix is one-interface-per-connection is chosen
+  persist: false
+  component-id: root\tap0901 # Windows only. Defaults: root\tap0901 or tap0901
+
+  # Warning: This below option will prevent all the tunnel->allow from taking effect. Use iptables as needed!
+  one-interface-per-connection: false # Set to true to use separate interface per connection
+
+
+scripts:
+  # These scripts get run as "args... operation subnet interface user"
+  # Pass in an array, first argument is the executable, further arguments
+  # are used before WSVPN provided arguments
+  # User will not be present if no authentication is enabled
+  # Example: "./handler.sh" might be called like "./handler.sh up 192.168.3.2/24 tun0 user"
+  up: []
+  down: []
+  # Interface will only be set if the server has "one-interface-per-connection" set to false
+  # User will never be set
+  startup: []
+
+server:
+  listen: 127.0.0.1:9000
+  enable-http3: false
+  website-directory: "" # Serve normal HTTP(S) requests from this folder, disabled if blank
+
+  headers: # Map of headers (string key to *list* of string values)
+  # X-Some-Host:
+  #   - example.com
+  # X-Other-Header:
+  #   - value1
+  #   - value2
+
+  tls:
+    client-ca: "" # Filename of CA for mTLS
+    certificate: "" # Filename of certificate for TLS
+    key: "" # Filename of private key for TLS
+    config:
+      min-version: 1.2
+      max-version: 1.3
+      key-log-file: "" # This will log TLS secret keys to a file. DO NOT USE IN PRODUCTION!
+  authenticator:
+    type: htpasswd # radius, allow-all or htpasswd
+    # allow-all: Just allow all clients regardless of authentication
+    # htpasswd: Set config key to filename of a htpasswd-formatted file; Authenticates clients using HTTP Basic authentication
+      # radius: Set to the path of a YAML file containing the keys "server: HOST:PORT" and "secret: SHARED_SECRET"
+    config: "htpasswd"
+  max-connections-per-user: 0 # Only works with a form of authentication enabled, 0 to disable
+  max-connections-per-user-mode: kill-oldest # kill-oldest or prevent-new
+  api:
+    enabled: false # Whether to enable the API
+    users: [ ] # Which users are allowed to use the API. Leaving this empty allows any authenticated user!
+  preauthorize-secret: "" # Will enable preauthorization if set
