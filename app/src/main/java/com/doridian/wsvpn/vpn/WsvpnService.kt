@@ -106,7 +106,7 @@ class WsvpnService : VpnService() {
             insecureTls = prof.insecureTls
         )
 
-        wsvpnClient = WsvpnClient(config, object : WsvpnClient.WsvpnListener {
+        wsvpnClient = WsvpnClient(config, vpnService = this, listener = object : WsvpnClient.WsvpnListener {
             override fun onInitReceived(params: InitParameters) {
                 scope.launch {
                     try {
@@ -184,13 +184,29 @@ class WsvpnService : VpnService() {
         }
         val serverIp = InetAddress.getByAddress(serverIpBytes).hostAddress ?: "10.0.0.1"
 
+        // Parse server IP to exclude from VPN routes (avoid routing loop)
+        val serverHost = try {
+            java.net.URI(profile?.serverUrl ?: "").host
+        } catch (_: Exception) { null }
+        val serverAddr = serverHost?.let {
+            try { InetAddress.getByName(it) } catch (_: Exception) { null }
+        }
+
         val builder = Builder()
             .setSession("WSVPN")
             .setMtu(params.mtu)
             .addAddress(clientIp, prefixLength)
             .addDnsServer("8.8.8.8")
             .addDnsServer("8.8.4.4")
-            .addRoute("0.0.0.0", 0)
+
+        if (serverAddr != null) {
+            // Add routes covering all IPs except the server IP
+            for (route in getRoutesExcluding(serverAddr.address)) {
+                builder.addRoute(InetAddress.getByAddress(route.first), route.second)
+            }
+        } else {
+            builder.addRoute("0.0.0.0", 0)
+        }
 
         // Apply per-app filtering
         val prof = profile
@@ -218,13 +234,19 @@ class WsvpnService : VpnService() {
             }
         }
 
-        // Always exclude ourselves to avoid routing loops
+        // Exclude ourselves to avoid routing loops (our tunnel socket must bypass VPN)
         try {
             builder.addDisallowedApplication(packageName)
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+            // Fails in ALLOWED mode (can't mix allowed/disallowed) — but in that mode
+            // we're already excluded unless explicitly in the allowed list
+        }
 
         vpnInterface = builder.establish()
             ?: throw IllegalStateException("VPN interface creation failed - permission denied?")
+
+        // Now that VPN is established, protect the WebSocket socket
+        wsvpnClient?.protectSocket()
 
         // Start reading from TUN
         startTunReader()
@@ -246,6 +268,11 @@ class WsvpnService : VpnService() {
                 while (isActive) {
                     val length = input.read(buffer)
                     if (length > 0) {
+                        // Check IP version: only forward IPv4 (server TUN is IPv4-only)
+                        val ipVersion = (buffer[0].toInt() and 0xF0) ushr 4
+                        if (ipVersion != 4) {
+                            continue
+                        }
                         val packet = buffer.copyOf(length)
                         wsvpnClient?.sendDataPacket(packet)
                     } else if (length < 0) {
@@ -271,7 +298,10 @@ class WsvpnService : VpnService() {
         vpnInterface = null
 
         profile = null
-        updateState(VpnState.Disconnected(reason))
+        // Don't overwrite Error state with a generic "Service destroyed" message
+        if (currentState !is VpnState.Error) {
+            updateState(VpnState.Disconnected(reason))
+        }
     }
 
     private fun updateState(state: VpnState) {
@@ -317,5 +347,53 @@ class WsvpnService : VpnService() {
     private fun updateNotification(text: String) {
         val manager = getSystemService(NotificationManager::class.java)
         manager.notify(NOTIFICATION_ID, buildNotification(text))
+    }
+
+    /**
+     * Generate CIDR routes covering all IPv4 addresses except the given one.
+     * This prevents VPN routing loops by excluding the VPN server's IP.
+     */
+    private fun getRoutesExcluding(excludeIp: ByteArray): List<Pair<ByteArray, Int>> {
+        val routes = mutableListOf<Pair<ByteArray, Int>>()
+        val excludeBits = ipToInt(excludeIp)
+
+        fun split(base: Int, prefix: Int) {
+            if (prefix > 32) return
+            // Check if the excluded IP falls within this subnet
+            val mask = if (prefix == 0) 0 else (-1 shl (32 - prefix))
+            if ((excludeBits and mask) != (base and mask)) {
+                // Excluded IP is not in this subnet, add the whole subnet
+                routes.add(Pair(intToIp(base), prefix))
+                return
+            }
+            if (prefix == 32) {
+                // This is the excluded IP itself, skip it
+                return
+            }
+            // Split into two halves
+            val nextPrefix = prefix + 1
+            val bit = 1 shl (31 - prefix)
+            split(base, nextPrefix)
+            split(base or bit, nextPrefix)
+        }
+
+        split(0, 0)
+        return routes
+    }
+
+    private fun ipToInt(ip: ByteArray): Int {
+        return ((ip[0].toInt() and 0xFF) shl 24) or
+                ((ip[1].toInt() and 0xFF) shl 16) or
+                ((ip[2].toInt() and 0xFF) shl 8) or
+                (ip[3].toInt() and 0xFF)
+    }
+
+    private fun intToIp(value: Int): ByteArray {
+        return byteArrayOf(
+            (value ushr 24).toByte(),
+            (value ushr 16).toByte(),
+            (value ushr 8).toByte(),
+            value.toByte()
+        )
     }
 }

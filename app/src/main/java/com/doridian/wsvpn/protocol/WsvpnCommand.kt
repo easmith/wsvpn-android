@@ -25,9 +25,10 @@ data class WsvpnCommand(
             return WsvpnCommand(command = "version", parameters = params)
         }
 
-        fun reply(replyTo: String, error: String = ""): WsvpnCommand {
+        fun reply(replyTo: String, errorMessage: String = ""): WsvpnCommand {
             val params = JsonObject().apply {
-                addProperty("error", error)
+                addProperty("ok", errorMessage.isEmpty())
+                addProperty("message", errorMessage.ifEmpty { "OK" })
             }
             return WsvpnCommand(id = replyTo, command = "reply", parameters = params)
         }

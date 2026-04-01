@@ -1,18 +1,22 @@
 package com.doridian.wsvpn.protocol
 
+import android.net.VpnService
 import android.util.Log
 import okhttp3.*
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import java.net.InetAddress
+import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeoutException
+import javax.net.SocketFactory
 
 class WsvpnClient(
     private val config: WsvpnConfig,
-    private val listener: WsvpnListener
+    private val listener: WsvpnListener,
+    private val vpnService: VpnService? = null
 ) {
     companion object {
         private const val TAG = "WsvpnClient"
@@ -48,12 +52,39 @@ class WsvpnClient(
     @Volatile private var connected = false
     @Volatile private var initialized = false
     private var handshakeTimer: java.util.Timer? = null
+    private var rawSocket: Socket? = null
+
+    /**
+     * Protect the underlying socket from VPN routing.
+     * Must be called after VpnService.establish() for protect() to succeed.
+     */
+    fun protectSocket(): Boolean {
+        val socket = rawSocket ?: return false
+        val service = vpnService ?: return false
+        return service.protect(socket)
+    }
 
     init {
         val builder = OkHttpClient.Builder()
             .pingInterval(25, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
             .connectTimeout(15, TimeUnit.SECONDS)
+
+        // Protect sockets from VPN routing to avoid routing loops.
+        // Note: protect() only works after VPN is established, so we also
+        // rely on addDisallowedApplication + route exclusion as primary mechanisms.
+        // This SocketFactory stores the socket so we can protect it after establish().
+        if (vpnService != null) {
+            builder.socketFactory(object : SocketFactory() {
+                override fun createSocket(): Socket {
+                    return Socket().also { rawSocket = it }
+                }
+                override fun createSocket(host: String, port: Int) = throw UnsupportedOperationException()
+                override fun createSocket(host: String, port: Int, a: InetAddress, b: Int) = throw UnsupportedOperationException()
+                override fun createSocket(host: InetAddress, port: Int) = throw UnsupportedOperationException()
+                override fun createSocket(host: InetAddress, port: Int, a: InetAddress, b: Int) = throw UnsupportedOperationException()
+            })
+        }
 
         if (config.insecureTls) {
             val trustAllCerts = arrayOf<javax.net.ssl.TrustManager>(
@@ -139,7 +170,6 @@ class WsvpnClient(
     }
 
     private fun handleCommand(cmd: WsvpnCommand) {
-        Log.d(TAG, "Received command: ${cmd.command} id=${cmd.id}")
 
         when (cmd.command) {
             "version" -> handleVersion(cmd)
@@ -282,8 +312,10 @@ class WsvpnClient(
     }
 
     private fun handleReply(cmd: WsvpnCommand) {
-        val error = cmd.parameters.get("error")?.asString ?: ""
-        if (error.isNotEmpty()) {
+        val ok = cmd.parameters.get("ok")?.asBoolean ?: true
+        val message = cmd.parameters.get("message")?.asString ?: ""
+        if (!ok) {
+            val error = message.ifEmpty { "Unknown error" }
             Log.e(TAG, "Reply error for ${cmd.id}: $error")
             replyErrors[cmd.id] = error
             // If the server rejects our version, disconnect
@@ -342,7 +374,6 @@ class WsvpnClient(
         override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
             val data = bytes.toByteArray()
             if (data.isEmpty()) return
-
             val packet = if (fragmentationEnabled && defragmenter != null) {
                 defragmenter!!.processMessage(data)
             } else {

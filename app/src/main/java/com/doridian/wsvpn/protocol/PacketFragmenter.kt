@@ -17,7 +17,7 @@ class PacketFragmenter(private val maxPayloadSize: Int) {
     }
 
     fun fragment(packet: ByteArray): List<ByteArray> {
-        // Check if packet fits in single fragment
+        // Single packet: 1-byte header [0x80][payload] (no packetId)
         if (packet.size + 1 <= maxPayloadSize) {
             val buf = ByteArray(1 + packet.size)
             buf[0] = UNFRAGMENTED_HEADER
@@ -25,8 +25,9 @@ class PacketFragmenter(private val maxPayloadSize: Int) {
             return listOf(buf)
         }
 
-        val dataPerFragment = maxPayloadSize - FRAGMENT_HEADER_SIZE
         val packetId = nextPacketId.getAndIncrement()
+
+        val dataPerFragment = maxPayloadSize - FRAGMENT_HEADER_SIZE
         val fragments = mutableListOf<ByteArray>()
         var offset = 0
         var fragmentIndex = 0
@@ -68,34 +69,17 @@ class PacketDefragmenter {
     }
 
     fun processMessage(data: ByteArray): ByteArray? {
-        if (data.isEmpty()) return null
+        if (data.size < 2) return null
 
         val firstByte = data[0].toInt() and 0xFF
 
-        // Unfragmented packet
-        if (firstByte == 0x80 && data.size > 1) {
-            // Check: if this is truly unfragmented (index=0, last=true), return payload
-            // But we need to distinguish from "last fragment with index 0"
-            // Unfragmented: 0x80 prefix, no packet ID
-            // Actually: 0x80 = index 0 | LAST flag. For unfragmented, there's no 4-byte packet ID.
-            // The protocol says unfragmented = [0x80][PAYLOAD]
-            // Fragmented = [flags][packetId 4 bytes][PAYLOAD]
-            // We distinguish by: unfragmented has no packet ID header
-            // But both start with 0x80... The difference is that unfragmented is [0x80][payload]
-            // and fragmented last-first is [0x80][4-byte-id][payload]
-            // We can't distinguish these without context.
-            // Looking at the Go code more carefully:
-            // If fragmentation is enabled, ALL packets use the fragment format.
-            // Unfragmented = single fragment with index=0 and last=true = 0x80 + 4-byte packet ID + payload
-            // So actually there's no special "unfragmented without ID" case when fragmentation is on.
-
-            // When fragmentation is OFF, raw packets are sent without any header.
-            // When fragmentation is ON, even single packets have the 5-byte header.
-
-            // Let's handle it properly:
-            return processFragment(data)
+        // Single packet: [0x80][payload] — 1-byte header, no packetId
+        // 0x80 = index 0 + last flag → unfragmented
+        if (firstByte == 0x80) {
+            return data.copyOfRange(1, data.size)
         }
 
+        // Multi-fragment: [flags][packetId 4B][payload] — 5-byte header
         return processFragment(data)
     }
 
@@ -108,13 +92,7 @@ class PacketDefragmenter {
 
         val packetId = ByteBuffer.wrap(data, 1, 4).order(ByteOrder.BIG_ENDIAN).int
         val payload = data.copyOfRange(PacketFragmenter.FRAGMENT_HEADER_SIZE, data.size)
-
         val key = FragmentKey(packetId)
-
-        // Single fragment packet (index 0 + last flag)
-        if (fragmentIndex == 0 && isLast) {
-            return payload
-        }
 
         val partial = partials.getOrPut(key) { PartialPacket() }
         partial.fragments[fragmentIndex] = payload
