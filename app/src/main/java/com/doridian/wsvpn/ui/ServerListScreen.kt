@@ -101,8 +101,16 @@ private fun ServerRow(
     onDisconnect: () -> Unit,
     onEdit: () -> Unit
 ) {
-    val activeAndLive = isActive && vpnState !is WsvpnService.VpnState.Disconnected &&
-            vpnState !is WsvpnService.VpnState.Error
+    // "Live" means the service is still doing something for this row: a real
+    // connection, a connect/reconnect attempt, or a kill-switch hold (TUN up,
+    // traffic blocked) — all of which the user can break out of via Disconnect.
+    val activeAndLive = isActive && when (vpnState) {
+        is WsvpnService.VpnState.Connected -> true
+        is WsvpnService.VpnState.Connecting -> true
+        is WsvpnService.VpnState.Reconnecting -> true
+        is WsvpnService.VpnState.Disconnected -> vpnState.killSwitchActive
+        is WsvpnService.VpnState.Error -> false
+    }
 
     Card(
         modifier = Modifier

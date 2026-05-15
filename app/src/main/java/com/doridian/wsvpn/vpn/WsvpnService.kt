@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.first
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.InetAddress
+import java.util.concurrent.atomic.AtomicInteger
 
 class WsvpnService : VpnService() {
 
@@ -71,6 +72,12 @@ class WsvpnService : VpnService() {
     private var profile: VpnProfile? = null
     private var server: VpnServer? = null
     private var reconnectAttempt = 0
+
+    // Bumped on every session boundary (start / stop). Each WsvpnClient listener
+    // captures the session it was created for and ignores callbacks that arrive
+    // after the session has been replaced — guards against an old client's async
+    // onDisconnected firing into a freshly-started new session.
+    private val sessionId = AtomicInteger(0)
 
     override fun onCreate() {
         super.onCreate()
@@ -165,6 +172,8 @@ class WsvpnService : VpnService() {
         val srv = server ?: return
         val prof = profile ?: return
 
+        val mySession = sessionId.incrementAndGet()
+
         updateState(VpnState.Connecting)
 
         val config = WsvpnClient.WsvpnConfig(
@@ -176,7 +185,9 @@ class WsvpnService : VpnService() {
 
         wsvpnClient = WsvpnClient(config, vpnService = this, listener = object : WsvpnClient.WsvpnListener {
             override fun onInitReceived(params: InitParameters) {
+                if (mySession != sessionId.get()) return
                 scope.launch {
+                    if (mySession != sessionId.get()) return@launch
                     try {
                         setupTunInterface(params)
                     } catch (e: Exception) {
@@ -196,6 +207,7 @@ class WsvpnService : VpnService() {
             }
 
             override fun onDataPacket(packet: ByteArray) {
+                if (mySession != sessionId.get()) return
                 try {
                     val output = vpnInterface?.fileDescriptor?.let { FileOutputStream(it) }
                     output?.write(packet)
@@ -209,6 +221,10 @@ class WsvpnService : VpnService() {
             }
 
             override fun onDisconnected(reason: String) {
+                if (mySession != sessionId.get()) {
+                    Log.d(TAG, "Ignoring stale onDisconnected (session $mySession, current ${sessionId.get()}): $reason")
+                    return
+                }
                 val wasError = currentState is VpnState.Error
                 val prof = profile
                 val killSwitch = prof?.killSwitch ?: false
@@ -261,6 +277,7 @@ class WsvpnService : VpnService() {
             }
 
             override fun onError(error: String) {
+                if (mySession != sessionId.get()) return
                 Log.e(TAG, "WsvpnClient error: $error")
                 updateState(VpnState.Error(error))
             }
@@ -395,6 +412,11 @@ class WsvpnService : VpnService() {
     }
 
     private fun stopVpn(reason: String) {
+        // Invalidate the current session so any in-flight WsvpnClient callbacks
+        // (which run on background threads after disconnect()) become no-ops
+        // instead of mutating state that now belongs to a fresh session.
+        sessionId.incrementAndGet()
+
         reconnectJob?.cancel()
         reconnectJob = null
 
