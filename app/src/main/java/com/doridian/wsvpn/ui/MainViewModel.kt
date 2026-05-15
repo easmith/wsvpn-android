@@ -41,7 +41,8 @@ data class AppListState(
     val installedApps: List<AppInfo> = emptyList(),
     val isLoadingApps: Boolean = false,
     val searchQuery: String = "",
-    val showSystemApps: Boolean = false
+    val showSystemApps: Boolean = false,
+    val showSelectedOnly: Boolean = false
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -136,6 +137,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleShowSystemApps() {
         _appList.update { it.copy(showSystemApps = !it.showSystemApps) }
+    }
+
+    fun toggleShowSelectedOnly() {
+        _appList.update { it.copy(showSelectedOnly = !it.showSelectedOnly) }
     }
 
     fun loadInstalledApps() {

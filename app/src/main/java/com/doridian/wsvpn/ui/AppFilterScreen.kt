@@ -5,8 +5,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -26,13 +27,21 @@ fun AppFilterScreen(viewModel: MainViewModel) {
         viewModel.loadInstalledApps()
     }
 
-    val filteredApps = remember(appList.installedApps, appList.searchQuery, appList.showSystemApps) {
+    val filteredApps = remember(
+        appList.installedApps,
+        appList.searchQuery,
+        appList.showSystemApps,
+        appList.showSelectedOnly,
+        profile.filteredApps
+    ) {
         appList.installedApps.filter { app ->
             val matchesSearch = appList.searchQuery.isEmpty() ||
                     app.label.contains(appList.searchQuery, ignoreCase = true) ||
                     app.packageName.contains(appList.searchQuery, ignoreCase = true)
             val matchesSystem = appList.showSystemApps || !app.isSystemApp
-            matchesSearch && matchesSystem
+            val matchesSelected = !appList.showSelectedOnly ||
+                    profile.filteredApps.contains(app.packageName)
+            matchesSearch && matchesSystem && matchesSelected
         }
     }
 
@@ -106,11 +115,25 @@ fun AppFilterScreen(viewModel: MainViewModel) {
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            Text(
-                text = "${profile.filteredApps.size} selected" +
-                        if (!appList.showSystemApps) " (user apps only)" else "",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            FilterChip(
+                selected = appList.showSelectedOnly,
+                onClick = { viewModel.toggleShowSelectedOnly() },
+                enabled = profile.filteredApps.isNotEmpty(),
+                label = {
+                    Text(
+                        "${profile.filteredApps.size} selected" +
+                                if (!appList.showSystemApps) " (user apps only)" else ""
+                    )
+                },
+                leadingIcon = if (appList.showSelectedOnly) {
+                    {
+                        Icon(
+                            Icons.Default.Check,
+                            contentDescription = null,
+                            modifier = Modifier.size(FilterChipDefaults.IconSize)
+                        )
+                    }
+                } else null,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
 
@@ -130,6 +153,20 @@ fun AppFilterScreen(viewModel: MainViewModel) {
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(horizontal = 8.dp)
             ) {
+                if (appList.showSelectedOnly && filteredApps.isEmpty() && !appList.isLoadingApps) {
+                    item {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(32.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "No selected apps match the current filter",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
                 items(filteredApps, key = { it.packageName }) { app ->
                     val isSelected = profile.filteredApps.contains(app.packageName)
 
