@@ -12,8 +12,10 @@ import com.doridian.wsvpn.data.AppFilterMode
 import com.doridian.wsvpn.data.VpnProfile
 import com.doridian.wsvpn.data.VpnSettingsRepository
 import com.doridian.wsvpn.vpn.WsvpnService
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 data class AppInfo(
     val packageName: String,
@@ -26,6 +28,7 @@ data class MainUiState(
     val profile: VpnProfile = VpnProfile(),
     val vpnState: WsvpnService.VpnState = WsvpnService.VpnState.Disconnected(""),
     val installedApps: List<AppInfo> = emptyList(),
+    val isLoadingApps: Boolean = false,
     val appSearchQuery: String = "",
     val showSystemApps: Boolean = false
 )
@@ -105,19 +108,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun loadInstalledApps() {
+        val current = _uiState.value
+        if (current.installedApps.isNotEmpty() || current.isLoadingApps) return
+        _uiState.update { it.copy(isLoadingApps = true) }
         viewModelScope.launch {
-            val pm = getApplication<Application>().packageManager
-            val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-                .map { appInfo ->
-                    AppInfo(
-                        packageName = appInfo.packageName,
-                        label = appInfo.loadLabel(pm).toString(),
-                        icon = try { appInfo.loadIcon(pm) } catch (_: Exception) { null },
-                        isSystemApp = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-                    )
-                }
-                .sortedBy { it.label.lowercase() }
-            _uiState.update { it.copy(installedApps = apps) }
+            val apps = withContext(Dispatchers.IO) {
+                val pm = getApplication<Application>().packageManager
+                pm.getInstalledApplications(PackageManager.GET_META_DATA)
+                    .map { appInfo ->
+                        AppInfo(
+                            packageName = appInfo.packageName,
+                            label = appInfo.loadLabel(pm).toString(),
+                            icon = try { appInfo.loadIcon(pm) } catch (_: Exception) { null },
+                            isSystemApp = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                        )
+                    }
+                    .sortedBy { it.label.lowercase() }
+            }
+            _uiState.update { it.copy(installedApps = apps, isLoadingApps = false) }
         }
     }
 

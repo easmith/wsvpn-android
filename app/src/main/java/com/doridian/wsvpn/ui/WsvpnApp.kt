@@ -36,10 +36,7 @@ fun WsvpnApp(
                     icon = { Icon(Icons.Default.Apps, contentDescription = "Apps") },
                     label = { Text("Apps") },
                     selected = currentRoute == "apps",
-                    onClick = {
-                        viewModel.loadInstalledApps()
-                        navController.navigate("apps") { popUpTo("connect") }
-                    }
+                    onClick = { navController.navigate("apps") { popUpTo("connect") } }
                 )
                 NavigationBarItem(
                     icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },

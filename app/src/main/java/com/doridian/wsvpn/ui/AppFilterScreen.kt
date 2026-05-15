@@ -12,11 +12,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.core.graphics.drawable.toBitmap
 import com.doridian.wsvpn.data.AppFilterMode
+import com.google.accompanist.drawablepainter.rememberDrawablePainter
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -117,6 +115,15 @@ fun AppFilterScreen(viewModel: MainViewModel) {
 
             Spacer(modifier = Modifier.height(8.dp))
 
+            if (state.isLoadingApps && filteredApps.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxWidth().padding(32.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator()
+                }
+            }
+
             // App list
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
@@ -137,7 +144,7 @@ fun AppFilterScreen(viewModel: MainViewModel) {
                         leadingContent = {
                             if (app.icon != null) {
                                 Image(
-                                    bitmap = app.icon.toBitmap(40, 40).asImageBitmap(),
+                                    painter = rememberDrawablePainter(app.icon),
                                     contentDescription = null,
                                     modifier = Modifier.size(40.dp)
                                 )
