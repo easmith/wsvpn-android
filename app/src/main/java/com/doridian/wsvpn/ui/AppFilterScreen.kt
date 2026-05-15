@@ -19,18 +19,19 @@ import com.google.accompanist.drawablepainter.rememberDrawablePainter
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppFilterScreen(viewModel: MainViewModel) {
-    val state by viewModel.uiState.collectAsState()
+    val profile by viewModel.profile.collectAsState()
+    val appList by viewModel.appList.collectAsState()
 
     LaunchedEffect(Unit) {
         viewModel.loadInstalledApps()
     }
 
-    val filteredApps = remember(state.installedApps, state.appSearchQuery, state.showSystemApps) {
-        state.installedApps.filter { app ->
-            val matchesSearch = state.appSearchQuery.isEmpty() ||
-                    app.label.contains(state.appSearchQuery, ignoreCase = true) ||
-                    app.packageName.contains(state.appSearchQuery, ignoreCase = true)
-            val matchesSystem = state.showSystemApps || !app.isSystemApp
+    val filteredApps = remember(appList.installedApps, appList.searchQuery, appList.showSystemApps) {
+        appList.installedApps.filter { app ->
+            val matchesSearch = appList.searchQuery.isEmpty() ||
+                    app.label.contains(appList.searchQuery, ignoreCase = true) ||
+                    app.packageName.contains(appList.searchQuery, ignoreCase = true)
+            val matchesSystem = appList.showSystemApps || !app.isSystemApp
             matchesSearch && matchesSystem
         }
     }
@@ -51,17 +52,17 @@ fun AppFilterScreen(viewModel: MainViewModel) {
 
                 SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                     SegmentedButton(
-                        selected = state.profile.appFilterMode == AppFilterMode.ALL,
+                        selected = profile.appFilterMode == AppFilterMode.ALL,
                         onClick = { viewModel.updateAppFilterMode(AppFilterMode.ALL) },
                         shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3)
                     ) { Text("All") }
                     SegmentedButton(
-                        selected = state.profile.appFilterMode == AppFilterMode.ALLOWED,
+                        selected = profile.appFilterMode == AppFilterMode.ALLOWED,
                         onClick = { viewModel.updateAppFilterMode(AppFilterMode.ALLOWED) },
                         shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3)
                     ) { Text("Only") }
                     SegmentedButton(
-                        selected = state.profile.appFilterMode == AppFilterMode.DISALLOWED,
+                        selected = profile.appFilterMode == AppFilterMode.DISALLOWED,
                         onClick = { viewModel.updateAppFilterMode(AppFilterMode.DISALLOWED) },
                         shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3)
                     ) { Text("Except") }
@@ -69,7 +70,7 @@ fun AppFilterScreen(viewModel: MainViewModel) {
 
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = when (state.profile.appFilterMode) {
+                    text = when (profile.appFilterMode) {
                         AppFilterMode.ALL -> "All apps use VPN"
                         AppFilterMode.ALLOWED -> "Only selected apps use VPN"
                         AppFilterMode.DISALLOWED -> "All apps except selected use VPN"
@@ -80,10 +81,10 @@ fun AppFilterScreen(viewModel: MainViewModel) {
             }
         }
 
-        if (state.profile.appFilterMode != AppFilterMode.ALL) {
+        if (profile.appFilterMode != AppFilterMode.ALL) {
             // Search bar
             OutlinedTextField(
-                value = state.appSearchQuery,
+                value = appList.searchQuery,
                 onValueChange = { viewModel.updateAppSearchQuery(it) },
                 placeholder = { Text("Search apps...") },
                 singleLine = true,
@@ -96,7 +97,7 @@ fun AppFilterScreen(viewModel: MainViewModel) {
                         Icon(
                             Icons.Default.FilterList,
                             contentDescription = "Toggle system apps",
-                            tint = if (state.showSystemApps) MaterialTheme.colorScheme.primary
+                            tint = if (appList.showSystemApps) MaterialTheme.colorScheme.primary
                                    else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
@@ -106,8 +107,8 @@ fun AppFilterScreen(viewModel: MainViewModel) {
             Spacer(modifier = Modifier.height(4.dp))
 
             Text(
-                text = "${state.profile.filteredApps.size} selected" +
-                        if (!state.showSystemApps) " (user apps only)" else "",
+                text = "${profile.filteredApps.size} selected" +
+                        if (!appList.showSystemApps) " (user apps only)" else "",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 16.dp)
@@ -115,7 +116,7 @@ fun AppFilterScreen(viewModel: MainViewModel) {
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            if (state.isLoadingApps && filteredApps.isEmpty()) {
+            if (appList.isLoadingApps && filteredApps.isEmpty()) {
                 Box(
                     modifier = Modifier.fillMaxWidth().padding(32.dp),
                     contentAlignment = Alignment.Center
@@ -130,7 +131,7 @@ fun AppFilterScreen(viewModel: MainViewModel) {
                 contentPadding = PaddingValues(horizontal = 8.dp)
             ) {
                 items(filteredApps, key = { it.packageName }) { app ->
-                    val isSelected = state.profile.filteredApps.contains(app.packageName)
+                    val isSelected = profile.filteredApps.contains(app.packageName)
 
                     ListItem(
                         headlineContent = { Text(app.label, maxLines = 1) },
@@ -167,10 +168,5 @@ fun AppFilterScreen(viewModel: MainViewModel) {
                 }
             }
         }
-    }
-
-    // Save settings when leaving
-    DisposableEffect(Unit) {
-        onDispose { viewModel.saveSettings() }
     }
 }

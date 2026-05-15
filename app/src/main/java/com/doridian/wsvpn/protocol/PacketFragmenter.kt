@@ -16,12 +16,16 @@ class PacketFragmenter(private val maxPayloadSize: Int) {
         const val FRAGMENT_HEADER_SIZE = 5 // 1 byte flags + 4 bytes packet ID
     }
 
-    fun fragment(packet: ByteArray): List<ByteArray> {
+    fun fragment(
+        packet: ByteArray,
+        offset: Int = 0,
+        length: Int = packet.size - offset
+    ): List<ByteArray> {
         // Single packet: 1-byte header [0x80][payload] (no packetId)
-        if (packet.size + 1 <= maxPayloadSize) {
-            val buf = ByteArray(1 + packet.size)
+        if (length + 1 <= maxPayloadSize) {
+            val buf = ByteArray(1 + length)
             buf[0] = UNFRAGMENTED_HEADER
-            System.arraycopy(packet, 0, buf, 1, packet.size)
+            System.arraycopy(packet, offset, buf, 1, length)
             return listOf(buf)
         }
 
@@ -29,22 +33,22 @@ class PacketFragmenter(private val maxPayloadSize: Int) {
 
         val dataPerFragment = maxPayloadSize - FRAGMENT_HEADER_SIZE
         val fragments = mutableListOf<ByteArray>()
-        var offset = 0
+        var pos = 0
         var fragmentIndex = 0
 
-        while (offset < packet.size) {
-            val remaining = packet.size - offset
+        while (pos < length) {
+            val remaining = length - pos
             val chunkSize = minOf(remaining, dataPerFragment)
-            val isLast = offset + chunkSize >= packet.size
+            val isLast = pos + chunkSize >= length
 
             val fragment = ByteArray(FRAGMENT_HEADER_SIZE + chunkSize)
             fragment[0] = (fragmentIndex and FRAGMENT_INDEX_MASK or (if (isLast) LAST_FRAGMENT_FLAG else 0)).toByte()
 
             ByteBuffer.wrap(fragment, 1, 4).order(ByteOrder.BIG_ENDIAN).putInt(packetId)
-            System.arraycopy(packet, offset, fragment, FRAGMENT_HEADER_SIZE, chunkSize)
+            System.arraycopy(packet, offset + pos, fragment, FRAGMENT_HEADER_SIZE, chunkSize)
 
             fragments.add(fragment)
-            offset += chunkSize
+            pos += chunkSize
             fragmentIndex++
         }
 

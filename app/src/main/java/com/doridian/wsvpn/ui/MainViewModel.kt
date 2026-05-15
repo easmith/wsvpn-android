@@ -14,8 +14,14 @@ import com.doridian.wsvpn.data.VpnServer
 import com.doridian.wsvpn.data.VpnSettingsRepository
 import com.doridian.wsvpn.vpn.WsvpnService
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
@@ -26,14 +32,15 @@ data class AppInfo(
     val isSystemApp: Boolean
 )
 
-data class MainUiState(
-    val profile: VpnProfile = VpnProfile(),
-    val servers: List<VpnServer> = emptyList(),
-    val activeServerId: String? = null,
+data class ConnectionState(
     val vpnState: WsvpnService.VpnState = WsvpnService.VpnState.Disconnected(""),
+    val activeServerId: String? = null
+)
+
+data class AppListState(
     val installedApps: List<AppInfo> = emptyList(),
     val isLoadingApps: Boolean = false,
-    val appSearchQuery: String = "",
+    val searchQuery: String = "",
     val showSystemApps: Boolean = false
 )
 
@@ -41,8 +48,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = VpnSettingsRepository(application)
 
-    private val _uiState = MutableStateFlow(MainUiState())
-    val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
+    private val _profile = MutableStateFlow(VpnProfile())
+    val profile: StateFlow<VpnProfile> = _profile.asStateFlow()
+
+    private val _servers = MutableStateFlow<List<VpnServer>>(emptyList())
+    val servers: StateFlow<List<VpnServer>> = _servers.asStateFlow()
+
+    private val _connection = MutableStateFlow(ConnectionState())
+    val connection: StateFlow<ConnectionState> = _connection.asStateFlow()
+
+    private val _appList = MutableStateFlow(AppListState())
+    val appList: StateFlow<AppListState> = _appList.asStateFlow()
+
+    private var saveJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -51,72 +69,79 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             repository.profile.collect { profile ->
-                _uiState.update { it.copy(profile = profile) }
+                _profile.value = profile
             }
         }
 
         viewModelScope.launch {
             repository.servers.collect { servers ->
-                _uiState.update { it.copy(servers = servers) }
+                _servers.value = servers
             }
         }
 
         WsvpnService.stateListener = { state, activeId ->
-            _uiState.update { it.copy(vpnState = state, activeServerId = activeId) }
+            _connection.value = ConnectionState(state, activeId)
         }
-        _uiState.update {
-            it.copy(
-                vpnState = WsvpnService.currentState,
-                activeServerId = WsvpnService.activeServerId
-            )
-        }
+        _connection.value = ConnectionState(
+            vpnState = WsvpnService.currentState,
+            activeServerId = WsvpnService.activeServerId
+        )
     }
 
     override fun onCleared() {
         WsvpnService.stateListener = null
+        // Flush any pending settings write so the user doesn't lose a toggle made
+        // immediately before the activity is destroyed. Use a process-scoped
+        // coroutine because viewModelScope is already cancelling.
+        val pendingProfile = _profile.value
+        if (saveJob?.isActive == true) {
+            saveJob?.cancel()
+            runBlocking { repository.saveProfile(pendingProfile) }
+        }
         super.onCleared()
     }
 
     fun updateInsecureTls(insecure: Boolean) {
-        _uiState.update { it.copy(profile = it.profile.copy(insecureTls = insecure)) }
+        _profile.update { it.copy(insecureTls = insecure) }
+        scheduleSave()
     }
 
     fun updateAutoReconnect(auto: Boolean) {
-        _uiState.update { it.copy(profile = it.profile.copy(autoReconnect = auto)) }
+        _profile.update { it.copy(autoReconnect = auto) }
+        scheduleSave()
     }
 
     fun updateKillSwitch(enabled: Boolean) {
-        _uiState.update { it.copy(profile = it.profile.copy(killSwitch = enabled)) }
+        _profile.update { it.copy(killSwitch = enabled) }
+        scheduleSave()
     }
 
     fun updateAppFilterMode(mode: AppFilterMode) {
-        _uiState.update { it.copy(profile = it.profile.copy(appFilterMode = mode)) }
+        _profile.update { it.copy(appFilterMode = mode) }
+        scheduleSave()
     }
 
     fun toggleAppFilter(packageName: String) {
-        _uiState.update { state ->
-            val current = state.profile.filteredApps
-            val updated = if (current.contains(packageName)) {
-                current - packageName
-            } else {
-                current + packageName
-            }
-            state.copy(profile = state.profile.copy(filteredApps = updated))
+        _profile.update { profile ->
+            val current = profile.filteredApps
+            val updated = if (current.contains(packageName)) current - packageName else current + packageName
+            profile.copy(filteredApps = updated)
         }
+        scheduleSave()
     }
 
     fun updateAppSearchQuery(query: String) {
-        _uiState.update { it.copy(appSearchQuery = query) }
+        _appList.update { it.copy(searchQuery = query) }
     }
 
     fun toggleShowSystemApps() {
-        _uiState.update { it.copy(showSystemApps = !it.showSystemApps) }
+        _appList.update { it.copy(showSystemApps = !it.showSystemApps) }
     }
 
     fun loadInstalledApps() {
-        val current = _uiState.value
+        val current = _appList.value
         if (current.installedApps.isNotEmpty() || current.isLoadingApps) return
-        _uiState.update { it.copy(isLoadingApps = true) }
+        _appList.update { it.copy(isLoadingApps = true) }
         viewModelScope.launch {
             val apps = withContext(Dispatchers.IO) {
                 val pm = getApplication<Application>().packageManager
@@ -131,14 +156,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     .sortedBy { it.label.lowercase() }
             }
-            _uiState.update { it.copy(installedApps = apps, isLoadingApps = false) }
+            _appList.update { it.copy(installedApps = apps, isLoadingApps = false) }
         }
     }
 
     fun connectServer(id: String) {
         viewModelScope.launch {
-            val server = _uiState.value.servers.firstOrNull { it.id == id } ?: return@launch
-            val profile = _uiState.value.profile
+            val server = _servers.value.firstOrNull { it.id == id } ?: return@launch
+            val profile = _profile.value
             repository.setSelectedServerId(id)
             val context = getApplication<Application>()
             val intent = Intent(context, WsvpnService::class.java).apply {
@@ -174,20 +199,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteServer(id: String) {
         viewModelScope.launch {
-            if (_uiState.value.activeServerId == id) {
+            if (_connection.value.activeServerId == id) {
                 disconnect()
             }
             repository.deleteServer(id)
         }
     }
 
-    fun saveSettings() {
-        viewModelScope.launch {
-            repository.saveProfile(_uiState.value.profile)
-        }
-    }
-
     fun getVpnPrepareIntent(): Intent? {
         return VpnService.prepare(getApplication())
+    }
+
+    private fun scheduleSave() {
+        saveJob?.cancel()
+        saveJob = viewModelScope.launch {
+            delay(300)
+            repository.saveProfile(_profile.value)
+        }
     }
 }

@@ -9,6 +9,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -18,7 +19,7 @@ import androidx.compose.ui.unit.dp
 
 @Composable
 fun SettingsScreen(viewModel: MainViewModel) {
-    val state by viewModel.uiState.collectAsState()
+    val profile by viewModel.profile.collectAsState()
 
     Column(
         modifier = Modifier
@@ -57,7 +58,7 @@ fun SettingsScreen(viewModel: MainViewModel) {
                         )
                     }
                     Switch(
-                        checked = state.profile.autoReconnect,
+                        checked = profile.autoReconnect,
                         onCheckedChange = { viewModel.updateAutoReconnect(it) }
                     )
                 }
@@ -90,7 +91,7 @@ fun SettingsScreen(viewModel: MainViewModel) {
                         )
                     }
                     Switch(
-                        checked = state.profile.killSwitch,
+                        checked = profile.killSwitch,
                         onCheckedChange = { viewModel.updateKillSwitch(it) }
                     )
                 }
@@ -116,7 +117,7 @@ fun SettingsScreen(viewModel: MainViewModel) {
                         },
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Default.OpenInNew, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(20.dp))
                     Spacer(modifier = Modifier.width(8.dp))
                     Column {
                         Text(
@@ -147,7 +148,7 @@ fun SettingsScreen(viewModel: MainViewModel) {
                         )
                     }
                     Switch(
-                        checked = state.profile.insecureTls,
+                        checked = profile.insecureTls,
                         onCheckedChange = { viewModel.updateInsecureTls(it) }
                     )
                 }
@@ -201,7 +202,7 @@ fun SettingsScreen(viewModel: MainViewModel) {
                         },
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Default.OpenInNew, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(20.dp))
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         "WSVPN Server on GitHub",
@@ -210,10 +211,5 @@ fun SettingsScreen(viewModel: MainViewModel) {
                 }
             }
         }
-    }
-
-    // Save settings when leaving
-    DisposableEffect(Unit) {
-        onDispose { viewModel.saveSettings() }
     }
 }

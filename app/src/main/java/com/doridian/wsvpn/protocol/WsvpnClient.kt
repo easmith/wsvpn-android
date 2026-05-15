@@ -151,17 +151,17 @@ class WsvpnClient(
         webSocket = null
     }
 
-    fun sendDataPacket(packet: ByteArray) {
+    fun sendDataPacket(buffer: ByteArray, offset: Int, length: Int) {
         if (!initialized) return
         val ws = webSocket ?: return
 
         if (fragmentationEnabled && fragmenter != null) {
-            val fragments = fragmenter!!.fragment(packet)
+            val fragments = fragmenter!!.fragment(buffer, offset, length)
             for (fragment in fragments) {
                 ws.send(fragment.toByteString(0, fragment.size))
             }
         } else {
-            ws.send(packet.toByteString(0, packet.size))
+            ws.send(buffer.toByteString(offset, offset + length))
         }
     }
 

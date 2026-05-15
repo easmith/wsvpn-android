@@ -65,6 +65,7 @@ class WsvpnService : VpnService() {
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
+    private var tunOutput: FileOutputStream? = null
     private var wsvpnClient: WsvpnClient? = null
     private var tunReadJob: Job? = null
     private var reconnectJob: Job? = null
@@ -209,8 +210,7 @@ class WsvpnService : VpnService() {
             override fun onDataPacket(packet: ByteArray) {
                 if (mySession != sessionId.get()) return
                 try {
-                    val output = vpnInterface?.fileDescriptor?.let { FileOutputStream(it) }
-                    output?.write(packet)
+                    tunOutput?.write(packet)
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to write to TUN", e)
                 }
@@ -239,6 +239,8 @@ class WsvpnService : VpnService() {
                 if (!keepTunUp) {
                     tunReadJob?.cancel()
                     tunReadJob = null
+                    runCatching { tunOutput?.close() }
+                    tunOutput = null
                     vpnInterface?.close()
                     vpnInterface = null
                 }
@@ -364,9 +366,12 @@ class WsvpnService : VpnService() {
 
         // Close any stale TUN before establishing a new one (e.g., during auto-reconnect
         // setupTunInterface runs again with a fresh fd).
+        runCatching { tunOutput?.close() }
+        tunOutput = null
         vpnInterface?.close()
         vpnInterface = builder.establish()
             ?: throw IllegalStateException("VPN interface creation failed - permission denied?")
+        tunOutput = FileOutputStream(vpnInterface!!.fileDescriptor)
 
         // Now that VPN is established, protect the WebSocket socket
         wsvpnClient?.protectSocket()
@@ -397,8 +402,7 @@ class WsvpnService : VpnService() {
                         if (ipVersion != 4) {
                             continue
                         }
-                        val packet = buffer.copyOf(length)
-                        wsvpnClient?.sendDataPacket(packet)
+                        wsvpnClient?.sendDataPacket(buffer, 0, length)
                     } else if (length < 0) {
                         break
                     }
@@ -426,6 +430,8 @@ class WsvpnService : VpnService() {
         wsvpnClient?.disconnect()
         wsvpnClient = null
 
+        runCatching { tunOutput?.close() }
+        tunOutput = null
         vpnInterface?.close()
         vpnInterface = null
 

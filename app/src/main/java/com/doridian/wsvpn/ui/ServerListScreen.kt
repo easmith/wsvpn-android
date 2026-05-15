@@ -11,11 +11,13 @@ import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.LinkOff
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.doridian.wsvpn.data.VpnServer
 import com.doridian.wsvpn.vpn.WsvpnService
@@ -29,7 +31,8 @@ fun ServerListScreen(
     onEditServer: (String) -> Unit,
     onAddServer: () -> Unit
 ) {
-    val state by viewModel.uiState.collectAsState()
+    val servers by viewModel.servers.collectAsState()
+    val connection by viewModel.connection.collectAsState()
 
     Scaffold(
         floatingActionButton = {
@@ -40,7 +43,7 @@ fun ServerListScreen(
             )
         }
     ) { padding ->
-        if (state.servers.isEmpty()) {
+        if (servers.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -76,11 +79,11 @@ fun ServerListScreen(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                items(state.servers, key = { it.id }) { server ->
+                items(servers, key = { it.id }) { server ->
                     ServerRow(
                         server = server,
-                        isActive = server.id == state.activeServerId,
-                        vpnState = state.vpnState,
+                        isActive = server.id == connection.activeServerId,
+                        vpnState = connection.vpnState,
                         onConnect = { onConnect(server.id) },
                         onDisconnect = onDisconnect,
                         onEdit = { onEditServer(server.id) }
@@ -111,21 +114,27 @@ private fun ServerRow(
         is WsvpnService.VpnState.Disconnected -> vpnState.killSwitchActive
         is WsvpnService.VpnState.Error -> false
     }
+    val isBlocked = isActive && vpnState is WsvpnService.VpnState.Disconnected && vpnState.killSwitchActive
+
+    val containerColor = when {
+        !activeAndLive -> CardDefaults.cardColors().containerColor
+        isBlocked -> MaterialTheme.colorScheme.errorContainer
+        vpnState is WsvpnService.VpnState.Connected -> MaterialTheme.colorScheme.primaryContainer
+        vpnState is WsvpnService.VpnState.Connecting ||
+                vpnState is WsvpnService.VpnState.Reconnecting -> MaterialTheme.colorScheme.secondaryContainer
+        else -> CardDefaults.cardColors().containerColor
+    }
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onEdit),
-        colors = if (activeAndLive) {
-            CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
-        } else {
-            CardDefaults.cardColors()
-        }
+        colors = CardDefaults.cardColors(containerColor = containerColor)
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
-                    Icons.Default.Dns,
+                    imageVector = if (isBlocked) Icons.Default.Shield else Icons.Default.Dns,
                     contentDescription = null,
                     modifier = Modifier.size(24.dp)
                 )
@@ -188,31 +197,24 @@ private fun ServerRow(
 
 @Composable
 private fun VpnStatusLine(state: WsvpnService.VpnState) {
+    val (icon: ImageVector, label) = when (state) {
+        is WsvpnService.VpnState.Connected -> Icons.Default.CheckCircle to "Connected"
+        is WsvpnService.VpnState.Connecting -> Icons.Default.Sync to "Connecting..."
+        is WsvpnService.VpnState.Reconnecting -> Icons.Default.Sync to "Reconnecting..."
+        is WsvpnService.VpnState.Error -> Icons.Default.Error to "Error"
+        is WsvpnService.VpnState.Disconnected ->
+            (if (state.killSwitchActive) Icons.Default.Shield else Icons.Default.CloudOff) to
+                if (state.killSwitchActive) "Blocked by kill-switch" else "Disconnected"
+    }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Icon(
-            imageVector = when (state) {
-                is WsvpnService.VpnState.Connected -> Icons.Default.CheckCircle
-                is WsvpnService.VpnState.Connecting -> Icons.Default.Sync
-                is WsvpnService.VpnState.Reconnecting -> Icons.Default.Sync
-                is WsvpnService.VpnState.Error -> Icons.Default.Error
-                is WsvpnService.VpnState.Disconnected -> Icons.Default.CloudOff
-            },
-            contentDescription = null,
+            imageVector = icon,
+            contentDescription = label,
             modifier = Modifier.size(18.dp)
         )
         Spacer(modifier = Modifier.width(8.dp))
         Column {
-            Text(
-                text = when (state) {
-                    is WsvpnService.VpnState.Connected -> "Connected"
-                    is WsvpnService.VpnState.Connecting -> "Connecting..."
-                    is WsvpnService.VpnState.Reconnecting -> "Reconnecting..."
-                    is WsvpnService.VpnState.Error -> "Error"
-                    is WsvpnService.VpnState.Disconnected ->
-                        if (state.killSwitchActive) "Blocked by kill-switch" else "Disconnected"
-                },
-                style = MaterialTheme.typography.labelLarge
-            )
+            Text(text = label, style = MaterialTheme.typography.labelLarge)
             val detail = when (state) {
                 is WsvpnService.VpnState.Connected -> "IP: ${state.clientIp}"
                 is WsvpnService.VpnState.Reconnecting -> "Attempt ${state.attempt}"

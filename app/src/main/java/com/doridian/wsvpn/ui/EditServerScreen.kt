@@ -1,11 +1,12 @@
 package com.doridian.wsvpn.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Lock
@@ -14,6 +15,7 @@ import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -29,27 +31,39 @@ fun EditServerScreen(
     serverId: String,
     onBack: () -> Unit
 ) {
-    val state by viewModel.uiState.collectAsState()
+    val servers by viewModel.servers.collectAsState()
     val isNew = serverId == "new"
 
-    val existing = remember(state.servers, serverId) {
-        if (isNew) null else state.servers.firstOrNull { it.id == serverId }
+    val existing = remember(servers, serverId) {
+        if (isNew) null else servers.firstOrNull { it.id == serverId }
     }
 
-    var name by remember(existing?.id) { mutableStateOf(existing?.name ?: "") }
-    var url by remember(existing?.id) { mutableStateOf(existing?.serverUrl ?: "") }
-    var username by remember(existing?.id) { mutableStateOf(existing?.username ?: "") }
-    var password by remember(existing?.id) { mutableStateOf(existing?.password ?: "") }
-    var passwordVisible by remember { mutableStateOf(false) }
-    var showDeleteConfirm by remember { mutableStateOf(false) }
+    var name by rememberSaveable(existing?.id) { mutableStateOf(existing?.name ?: "") }
+    var url by rememberSaveable(existing?.id) { mutableStateOf(existing?.serverUrl ?: "") }
+    var username by rememberSaveable(existing?.id) { mutableStateOf(existing?.username ?: "") }
+    var password by rememberSaveable(existing?.id) { mutableStateOf(existing?.password ?: "") }
+    var passwordVisible by rememberSaveable { mutableStateOf(false) }
+    var showDeleteConfirm by rememberSaveable { mutableStateOf(false) }
+    var showDiscardConfirm by rememberSaveable { mutableStateOf(false) }
+
+    val isDirty = name != (existing?.name ?: "") ||
+            url != (existing?.serverUrl ?: "") ||
+            username != (existing?.username ?: "") ||
+            password != (existing?.password ?: "")
+
+    val attemptBack: () -> Unit = {
+        if (isDirty) showDiscardConfirm = true else onBack()
+    }
+
+    BackHandler(enabled = isDirty) { showDiscardConfirm = true }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text(if (isNew) "Add server" else "Edit server") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
+                    IconButton(onClick = attemptBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
                 actions = {
@@ -163,6 +177,23 @@ fun EditServerScreen(
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirm = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    if (showDiscardConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDiscardConfirm = false },
+            title = { Text("Discard changes?") },
+            text = { Text("Your edits will be lost.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showDiscardConfirm = false
+                    onBack()
+                }) { Text("Discard") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDiscardConfirm = false }) { Text("Keep editing") }
             }
         )
     }

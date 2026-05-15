@@ -34,19 +34,34 @@ fun WsvpnApp(
                         icon = { Icon(Icons.Default.VpnKey, contentDescription = "Connect") },
                         label = { Text("Connect") },
                         selected = currentRoute == "servers",
-                        onClick = { navController.navigate("servers") { popUpTo("servers") { inclusive = true } } }
+                        onClick = {
+                            navController.navigate("servers") {
+                                popUpTo("servers") { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
                     )
                     NavigationBarItem(
                         icon = { Icon(Icons.Default.Apps, contentDescription = "Apps") },
                         label = { Text("Apps") },
                         selected = currentRoute == "apps",
-                        onClick = { navController.navigate("apps") { popUpTo("servers") } }
+                        onClick = {
+                            navController.navigate("apps") {
+                                popUpTo("servers") { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
                     )
                     NavigationBarItem(
                         icon = { Icon(Icons.Default.Settings, contentDescription = "Settings") },
                         label = { Text("Settings") },
                         selected = currentRoute == "settings",
-                        onClick = { navController.navigate("settings") { popUpTo("servers") } }
+                        onClick = {
+                            navController.navigate("settings") {
+                                popUpTo("servers") { inclusive = true }
+                                launchSingleTop = true
+                            }
+                        }
                     )
                 }
             }
