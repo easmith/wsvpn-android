@@ -18,12 +18,15 @@ import com.doridian.wsvpn.ui.theme.WsvpnTheme
 class MainActivity : ComponentActivity() {
 
     private val viewModel: MainViewModel by viewModels()
+    private var pendingConnectId: String? = null
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        if (result.resultCode == RESULT_OK) {
-            viewModel.saveAndConnect()
+        val id = pendingConnectId
+        pendingConnectId = null
+        if (result.resultCode == RESULT_OK && id != null) {
+            viewModel.connectServer(id)
         }
     }
 
@@ -50,7 +53,7 @@ class MainActivity : ComponentActivity() {
                 ) {
                     WsvpnApp(
                         viewModel = viewModel,
-                        onConnect = { connectVpn() },
+                        onConnect = { id -> connectVpn(id) },
                         onDisconnect = { viewModel.disconnect() }
                     )
                 }
@@ -58,12 +61,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun connectVpn() {
+    private fun connectVpn(serverId: String) {
         val prepareIntent = viewModel.getVpnPrepareIntent()
         if (prepareIntent != null) {
+            pendingConnectId = serverId
             vpnPermissionLauncher.launch(prepareIntent)
         } else {
-            viewModel.saveAndConnect()
+            viewModel.connectServer(serverId)
         }
     }
 }

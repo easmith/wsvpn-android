@@ -10,12 +10,14 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.doridian.wsvpn.data.AppFilterMode
 import com.doridian.wsvpn.data.VpnProfile
+import com.doridian.wsvpn.data.VpnServer
 import com.doridian.wsvpn.data.VpnSettingsRepository
 import com.doridian.wsvpn.vpn.WsvpnService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.UUID
 
 data class AppInfo(
     val packageName: String,
@@ -26,6 +28,8 @@ data class AppInfo(
 
 data class MainUiState(
     val profile: VpnProfile = VpnProfile(),
+    val servers: List<VpnServer> = emptyList(),
+    val activeServerId: String? = null,
     val vpnState: WsvpnService.VpnState = WsvpnService.VpnState.Disconnected(""),
     val installedApps: List<AppInfo> = emptyList(),
     val isLoadingApps: Boolean = false,
@@ -42,33 +46,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch {
+            repository.migrateLegacyProfileIfNeeded()
+        }
+
+        viewModelScope.launch {
             repository.profile.collect { profile ->
                 _uiState.update { it.copy(profile = profile) }
             }
         }
 
-        // Listen for VPN state changes
-        WsvpnService.stateListener = { state ->
-            _uiState.update { it.copy(vpnState = state) }
+        viewModelScope.launch {
+            repository.servers.collect { servers ->
+                _uiState.update { it.copy(servers = servers) }
+            }
         }
-        _uiState.update { it.copy(vpnState = WsvpnService.currentState) }
+
+        WsvpnService.stateListener = { state, activeId ->
+            _uiState.update { it.copy(vpnState = state, activeServerId = activeId) }
+        }
+        _uiState.update {
+            it.copy(
+                vpnState = WsvpnService.currentState,
+                activeServerId = WsvpnService.activeServerId
+            )
+        }
     }
 
     override fun onCleared() {
         WsvpnService.stateListener = null
         super.onCleared()
-    }
-
-    fun updateServerUrl(url: String) {
-        _uiState.update { it.copy(profile = it.profile.copy(serverUrl = url)) }
-    }
-
-    fun updateUsername(username: String) {
-        _uiState.update { it.copy(profile = it.profile.copy(username = username)) }
-    }
-
-    fun updatePassword(password: String) {
-        _uiState.update { it.copy(profile = it.profile.copy(password = password)) }
     }
 
     fun updateInsecureTls(insecure: Boolean) {
@@ -129,22 +135,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun saveAndConnect() {
+    fun connectServer(id: String) {
         viewModelScope.launch {
+            val server = _uiState.value.servers.firstOrNull { it.id == id } ?: return@launch
             val profile = _uiState.value.profile
-            repository.saveProfile(profile)
-
+            repository.setSelectedServerId(id)
             val context = getApplication<Application>()
             val intent = Intent(context, WsvpnService::class.java).apply {
                 action = WsvpnService.ACTION_CONNECT
-                putExtra("server_url", profile.serverUrl)
-                putExtra("username", profile.username)
-                putExtra("password", profile.password)
-                putExtra("insecure_tls", profile.insecureTls)
-                putExtra("auto_reconnect", profile.autoReconnect)
-                putExtra("kill_switch", profile.killSwitch)
-                putExtra("app_filter_mode", profile.appFilterMode.name)
-                putExtra("filtered_apps", profile.filteredApps.toTypedArray())
+                putExtra(WsvpnService.EXTRA_SERVER_ID, server.id)
+                putExtra(WsvpnService.EXTRA_SERVER_URL, server.serverUrl)
+                putExtra(WsvpnService.EXTRA_USERNAME, server.username)
+                putExtra(WsvpnService.EXTRA_PASSWORD, server.password)
+                putExtra(WsvpnService.EXTRA_INSECURE_TLS, profile.insecureTls)
+                putExtra(WsvpnService.EXTRA_AUTO_RECONNECT, profile.autoReconnect)
+                putExtra(WsvpnService.EXTRA_KILL_SWITCH, profile.killSwitch)
+                putExtra(WsvpnService.EXTRA_APP_FILTER_MODE, profile.appFilterMode.name)
+                putExtra(WsvpnService.EXTRA_FILTERED_APPS, profile.filteredApps.toTypedArray())
             }
             context.startForegroundService(intent)
         }
@@ -156,6 +163,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             action = WsvpnService.ACTION_DISCONNECT
         }
         context.startService(intent)
+    }
+
+    fun saveServer(server: VpnServer) {
+        viewModelScope.launch {
+            val id = server.id.ifBlank { UUID.randomUUID().toString() }
+            repository.upsertServer(server.copy(id = id))
+        }
+    }
+
+    fun deleteServer(id: String) {
+        viewModelScope.launch {
+            if (_uiState.value.activeServerId == id) {
+                disconnect()
+            }
+            repository.deleteServer(id)
+        }
     }
 
     fun saveSettings() {

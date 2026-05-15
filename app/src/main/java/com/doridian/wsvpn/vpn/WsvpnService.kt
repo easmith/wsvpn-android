@@ -13,6 +13,7 @@ import android.util.Log
 import com.doridian.wsvpn.R
 import com.doridian.wsvpn.data.AppFilterMode
 import com.doridian.wsvpn.data.VpnProfile
+import com.doridian.wsvpn.data.VpnServer
 import com.doridian.wsvpn.data.VpnSettingsRepository
 import com.doridian.wsvpn.protocol.InitParameters
 import com.doridian.wsvpn.protocol.WsvpnClient
@@ -33,11 +34,25 @@ class WsvpnService : VpnService() {
         const val ACTION_CONNECT = "com.doridian.wsvpn.CONNECT"
         const val ACTION_DISCONNECT = "com.doridian.wsvpn.DISCONNECT"
 
+        const val EXTRA_SERVER_ID = "server_id"
+        const val EXTRA_SERVER_URL = "server_url"
+        const val EXTRA_USERNAME = "username"
+        const val EXTRA_PASSWORD = "password"
+        const val EXTRA_INSECURE_TLS = "insecure_tls"
+        const val EXTRA_AUTO_RECONNECT = "auto_reconnect"
+        const val EXTRA_KILL_SWITCH = "kill_switch"
+        const val EXTRA_APP_FILTER_MODE = "app_filter_mode"
+        const val EXTRA_FILTERED_APPS = "filtered_apps"
+
         @Volatile
         var currentState: VpnState = VpnState.Disconnected("")
             private set
 
-        var stateListener: ((VpnState) -> Unit)? = null
+        @Volatile
+        var activeServerId: String? = null
+            private set
+
+        var stateListener: ((VpnState, String?) -> Unit)? = null
     }
 
     sealed class VpnState {
@@ -51,8 +66,10 @@ class WsvpnService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var wsvpnClient: WsvpnClient? = null
     private var tunReadJob: Job? = null
+    private var reconnectJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var profile: VpnProfile? = null
+    private var server: VpnServer? = null
     private var reconnectAttempt = 0
 
     override fun onCreate() {
@@ -62,54 +79,75 @@ class WsvpnService : VpnService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) {
-            // System restart (e.g. Always-on VPN). Load the saved profile from storage
-            // and connect — there are no intent extras to read from.
+            // System restart (e.g. Always-on VPN). Load the saved profile + selected
+            // server from storage and connect — no intent extras to read from.
             startForeground(NOTIFICATION_ID, buildNotification("Connecting..."))
             scope.launch {
-                val saved = try {
-                    VpnSettingsRepository(this@WsvpnService).profile.first()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to load saved profile", e)
-                    null
+                val repo = VpnSettingsRepository(this@WsvpnService)
+                val savedProfile = try { repo.profile.first() } catch (e: Exception) {
+                    Log.e(TAG, "Failed to load profile", e); null
                 }
-                if (saved == null || saved.serverUrl.isBlank()) {
-                    Log.w(TAG, "Always-on VPN start with no saved profile")
+                val savedId = try { repo.selectedServerId.first() } catch (e: Exception) {
+                    Log.e(TAG, "Failed to load selected server id", e); null
+                }
+                val savedServer = savedId?.let {
+                    try { repo.getServer(it) } catch (e: Exception) {
+                        Log.e(TAG, "Failed to load server", e); null
+                    }
+                }
+                if (savedProfile == null || savedServer == null || savedServer.serverUrl.isBlank()) {
+                    Log.w(TAG, "Always-on VPN start with no usable saved configuration")
                     updateState(VpnState.Error("No saved VPN configuration"))
                     stopSelf()
                     return@launch
                 }
-                profile = saved
+                profile = savedProfile
+                server = savedServer
+                setActiveServerId(savedServer.id)
                 startVpn()
             }
             return START_STICKY
         }
         when (intent.action) {
             ACTION_CONNECT -> {
-                val serverUrl = intent.getStringExtra("server_url") ?: ""
-                val username = intent.getStringExtra("username") ?: ""
-                val password = intent.getStringExtra("password") ?: ""
-                val insecureTls = intent.getBooleanExtra("insecure_tls", false)
-                val autoReconnect = intent.getBooleanExtra("auto_reconnect", true)
-                val killSwitch = intent.getBooleanExtra("kill_switch", true)
-                val filterMode = intent.getStringExtra("app_filter_mode") ?: "ALL"
-                val filteredApps = intent.getStringArrayExtra("filtered_apps")?.toSet() ?: emptySet()
+                val serverId = intent.getStringExtra(EXTRA_SERVER_ID) ?: ""
+                val serverUrl = intent.getStringExtra(EXTRA_SERVER_URL) ?: ""
+                val username = intent.getStringExtra(EXTRA_USERNAME) ?: ""
+                val password = intent.getStringExtra(EXTRA_PASSWORD) ?: ""
+                val insecureTls = intent.getBooleanExtra(EXTRA_INSECURE_TLS, false)
+                val autoReconnect = intent.getBooleanExtra(EXTRA_AUTO_RECONNECT, true)
+                val killSwitch = intent.getBooleanExtra(EXTRA_KILL_SWITCH, true)
+                val filterMode = intent.getStringExtra(EXTRA_APP_FILTER_MODE) ?: "ALL"
+                val filteredApps = intent.getStringArrayExtra(EXTRA_FILTERED_APPS)?.toSet() ?: emptySet()
+
+                // If we are mid-flight (connected, connecting, reconnecting, or kill-
+                // switch-blocking), tear it all down before starting the new server so
+                // there's never overlap.
+                if (wsvpnClient != null || vpnInterface != null || reconnectJob != null) {
+                    stopVpn("Switching server")
+                }
 
                 profile = VpnProfile(
-                    serverUrl = serverUrl,
-                    username = username,
-                    password = password,
                     insecureTls = insecureTls,
                     autoReconnect = autoReconnect,
                     killSwitch = killSwitch,
                     appFilterMode = AppFilterMode.valueOf(filterMode),
                     filteredApps = filteredApps
                 )
+                server = VpnServer(
+                    id = serverId,
+                    serverUrl = serverUrl,
+                    username = username,
+                    password = password
+                )
+                setActiveServerId(serverId.ifBlank { null })
 
                 startForeground(NOTIFICATION_ID, buildNotification("Connecting..."))
                 startVpn()
             }
             ACTION_DISCONNECT -> {
                 stopVpn("User disconnected")
+                setActiveServerId(null)
                 stopSelf()
             }
         }
@@ -118,19 +156,21 @@ class WsvpnService : VpnService() {
 
     override fun onDestroy() {
         stopVpn("Service destroyed")
+        setActiveServerId(null)
         scope.cancel()
         super.onDestroy()
     }
 
     private fun startVpn() {
+        val srv = server ?: return
         val prof = profile ?: return
 
         updateState(VpnState.Connecting)
 
         val config = WsvpnClient.WsvpnConfig(
-            serverUrl = prof.serverUrl,
-            username = prof.username,
-            password = prof.password,
+            serverUrl = srv.serverUrl,
+            username = srv.username,
+            password = srv.password,
             insecureTls = prof.insecureTls
         )
 
@@ -200,7 +240,8 @@ class WsvpnService : VpnService() {
                         updateNotification("Reconnecting in ${delayMs / 1000}s (attempt ${attempt + 1})...")
                     }
                     Log.i(TAG, "Scheduling reconnect in ${delayMs}ms (attempt ${attempt + 1}, killSwitch=$killSwitch)")
-                    scope.launch {
+                    reconnectJob?.cancel()
+                    reconnectJob = scope.launch {
                         delay(delayMs)
                         val st = currentState
                         if (st is VpnState.Disconnected || st is VpnState.Reconnecting) {
@@ -248,7 +289,7 @@ class WsvpnService : VpnService() {
 
         // Parse server IP to exclude from VPN routes (avoid routing loop)
         val serverHost = try {
-            java.net.URI(profile?.serverUrl ?: "").host
+            java.net.URI(server?.serverUrl ?: "").host
         } catch (_: Exception) { null }
         val serverAddr = serverHost?.let {
             try { InetAddress.getByName(it) } catch (_: Exception) { null }
@@ -354,6 +395,9 @@ class WsvpnService : VpnService() {
     }
 
     private fun stopVpn(reason: String) {
+        reconnectJob?.cancel()
+        reconnectJob = null
+
         tunReadJob?.cancel()
         tunReadJob = null
 
@@ -364,6 +408,7 @@ class WsvpnService : VpnService() {
         vpnInterface = null
 
         profile = null
+        server = null
         reconnectAttempt = 0
         // Don't overwrite Error state with a generic "Service destroyed" message
         if (currentState !is VpnState.Error) {
@@ -373,7 +418,13 @@ class WsvpnService : VpnService() {
 
     private fun updateState(state: VpnState) {
         currentState = state
-        stateListener?.invoke(state)
+        stateListener?.invoke(state, activeServerId)
+    }
+
+    private fun setActiveServerId(id: String?) {
+        if (activeServerId == id) return
+        activeServerId = id
+        stateListener?.invoke(currentState, id)
     }
 
     private fun createNotificationChannel() {
