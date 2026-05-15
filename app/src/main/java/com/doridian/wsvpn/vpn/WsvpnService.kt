@@ -13,10 +13,12 @@ import android.util.Log
 import com.doridian.wsvpn.R
 import com.doridian.wsvpn.data.AppFilterMode
 import com.doridian.wsvpn.data.VpnProfile
+import com.doridian.wsvpn.data.VpnSettingsRepository
 import com.doridian.wsvpn.protocol.InitParameters
 import com.doridian.wsvpn.protocol.WsvpnClient
 import com.doridian.wsvpn.ui.MainActivity
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.InetAddress
@@ -41,7 +43,8 @@ class WsvpnService : VpnService() {
     sealed class VpnState {
         object Connecting : VpnState()
         data class Connected(val serverIp: String, val clientIp: String) : VpnState()
-        data class Disconnected(val reason: String) : VpnState()
+        data class Reconnecting(val attempt: Int, val reason: String) : VpnState()
+        data class Disconnected(val reason: String, val killSwitchActive: Boolean = false) : VpnState()
         data class Error(val message: String) : VpnState()
     }
 
@@ -50,6 +53,7 @@ class WsvpnService : VpnService() {
     private var tunReadJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var profile: VpnProfile? = null
+    private var reconnectAttempt = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -57,13 +61,36 @@ class WsvpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        when (intent?.action) {
+        if (intent == null) {
+            // System restart (e.g. Always-on VPN). Load the saved profile from storage
+            // and connect — there are no intent extras to read from.
+            startForeground(NOTIFICATION_ID, buildNotification("Connecting..."))
+            scope.launch {
+                val saved = try {
+                    VpnSettingsRepository(this@WsvpnService).profile.first()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to load saved profile", e)
+                    null
+                }
+                if (saved == null || saved.serverUrl.isBlank()) {
+                    Log.w(TAG, "Always-on VPN start with no saved profile")
+                    updateState(VpnState.Error("No saved VPN configuration"))
+                    stopSelf()
+                    return@launch
+                }
+                profile = saved
+                startVpn()
+            }
+            return START_STICKY
+        }
+        when (intent.action) {
             ACTION_CONNECT -> {
                 val serverUrl = intent.getStringExtra("server_url") ?: ""
                 val username = intent.getStringExtra("username") ?: ""
                 val password = intent.getStringExtra("password") ?: ""
                 val insecureTls = intent.getBooleanExtra("insecure_tls", false)
                 val autoReconnect = intent.getBooleanExtra("auto_reconnect", true)
+                val killSwitch = intent.getBooleanExtra("kill_switch", true)
                 val filterMode = intent.getStringExtra("app_filter_mode") ?: "ALL"
                 val filteredApps = intent.getStringArrayExtra("filtered_apps")?.toSet() ?: emptySet()
 
@@ -73,6 +100,7 @@ class WsvpnService : VpnService() {
                     password = password,
                     insecureTls = insecureTls,
                     autoReconnect = autoReconnect,
+                    killSwitch = killSwitch,
                     appFilterMode = AppFilterMode.valueOf(filterMode),
                     filteredApps = filteredApps
                 )
@@ -142,17 +170,51 @@ class WsvpnService : VpnService() {
 
             override fun onDisconnected(reason: String) {
                 val wasError = currentState is VpnState.Error
-                updateState(VpnState.Disconnected(reason))
                 val prof = profile
-                if (prof?.autoReconnect == true && !wasError) {
+                val killSwitch = prof?.killSwitch ?: false
+                val shouldReconnect = prof?.autoReconnect == true && !wasError
+
+                // With kill-switch: keep TUN up so apps see no connectivity instead of
+                // leaking to the underlying network. Packets keep being read but are
+                // dropped at sendDataPacket() because the WS is not initialized.
+                // Without kill-switch, or on a fatal Error: tear down TUN so the system
+                // VPN indicator and routing reflect reality.
+                val keepTunUp = killSwitch && !wasError
+                if (!keepTunUp) {
+                    tunReadJob?.cancel()
+                    tunReadJob = null
+                    vpnInterface?.close()
+                    vpnInterface = null
+                }
+
+                if (shouldReconnect) {
+                    val attempt = reconnectAttempt
+                    reconnectAttempt = attempt + 1
+                    val delayMs = (3000L shl attempt.coerceAtMost(5)).coerceAtMost(60_000L)
+
+                    if (killSwitch) {
+                        updateState(VpnState.Reconnecting(attempt + 1, reason))
+                        updateNotification("Reconnecting in ${delayMs / 1000}s (attempt ${attempt + 1}) — traffic blocked")
+                    } else {
+                        updateState(VpnState.Disconnected(reason))
+                        updateNotification("Reconnecting in ${delayMs / 1000}s (attempt ${attempt + 1})...")
+                    }
+                    Log.i(TAG, "Scheduling reconnect in ${delayMs}ms (attempt ${attempt + 1}, killSwitch=$killSwitch)")
                     scope.launch {
-                        delay(3000)
-                        if (currentState is VpnState.Disconnected) {
+                        delay(delayMs)
+                        val st = currentState
+                        if (st is VpnState.Disconnected || st is VpnState.Reconnecting) {
                             Log.i(TAG, "Auto-reconnecting...")
                             startVpn()
                         }
                     }
+                } else if (killSwitch && !wasError) {
+                    // Kill-switch on, no auto-reconnect: keep TUN up, block traffic,
+                    // wait for user to manually reconnect or disconnect.
+                    updateState(VpnState.Disconnected(reason, killSwitchActive = true))
+                    updateNotification("Disconnected — traffic blocked by kill-switch")
                 } else {
+                    updateState(VpnState.Disconnected(reason))
                     stopSelf()
                 }
             }
@@ -242,6 +304,9 @@ class WsvpnService : VpnService() {
             // we're already excluded unless explicitly in the allowed list
         }
 
+        // Close any stale TUN before establishing a new one (e.g., during auto-reconnect
+        // setupTunInterface runs again with a fresh fd).
+        vpnInterface?.close()
         vpnInterface = builder.establish()
             ?: throw IllegalStateException("VPN interface creation failed - permission denied?")
 
@@ -251,6 +316,7 @@ class WsvpnService : VpnService() {
         // Start reading from TUN
         startTunReader()
 
+        reconnectAttempt = 0
         updateState(VpnState.Connected(serverIp, clientIp))
         updateNotification("Connected: $clientIp")
 
@@ -298,6 +364,7 @@ class WsvpnService : VpnService() {
         vpnInterface = null
 
         profile = null
+        reconnectAttempt = 0
         // Don't overwrite Error state with a generic "Service destroyed" message
         if (currentState !is VpnState.Error) {
             updateState(VpnState.Disconnected(reason))

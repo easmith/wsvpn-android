@@ -2,6 +2,7 @@ package com.doridian.wsvpn.ui
 
 import android.content.Intent
 import android.net.Uri
+import android.provider.Settings
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -72,6 +73,63 @@ fun SettingsScreen(viewModel: MainViewModel) {
                     text = "Security",
                     style = MaterialTheme.typography.titleMedium
                 )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Kill switch")
+                        Text(
+                            "Block traffic when the VPN tunnel is down",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = state.profile.killSwitch,
+                        onCheckedChange = { viewModel.updateKillSwitch(it) }
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                val context = LocalContext.current
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            try {
+                                context.startActivity(
+                                    Intent(Settings.ACTION_VPN_SETTINGS)
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            } catch (_: Exception) {
+                                context.startActivity(
+                                    Intent(Settings.ACTION_SETTINGS)
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            }
+                        },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.OpenInNew, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column {
+                        Text(
+                            "System Always-on VPN",
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            "Open system VPN settings to enable Always-on + Block connections without VPN for kernel-enforced protection",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(12.dp))
 

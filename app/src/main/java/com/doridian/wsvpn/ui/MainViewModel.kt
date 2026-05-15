@@ -76,6 +76,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(profile = it.profile.copy(autoReconnect = auto)) }
     }
 
+    fun updateKillSwitch(enabled: Boolean) {
+        _uiState.update { it.copy(profile = it.profile.copy(killSwitch = enabled)) }
+    }
+
     fun updateAppFilterMode(mode: AppFilterMode) {
         _uiState.update { it.copy(profile = it.profile.copy(appFilterMode = mode)) }
     }
@@ -130,6 +134,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 putExtra("password", profile.password)
                 putExtra("insecure_tls", profile.insecureTls)
                 putExtra("auto_reconnect", profile.autoReconnect)
+                putExtra("kill_switch", profile.killSwitch)
                 putExtra("app_filter_mode", profile.appFilterMode.name)
                 putExtra("filtered_apps", profile.filteredApps.toTypedArray())
             }

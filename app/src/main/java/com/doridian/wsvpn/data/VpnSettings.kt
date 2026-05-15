@@ -15,6 +15,7 @@ data class VpnProfile(
     val password: String = "",
     val insecureTls: Boolean = false,
     val autoReconnect: Boolean = true,
+    val killSwitch: Boolean = true,
     val appFilterMode: AppFilterMode = AppFilterMode.ALL,
     val filteredApps: Set<String> = emptySet()
 )
@@ -33,6 +34,7 @@ class VpnSettingsRepository(private val context: Context) {
         private val PASSWORD = stringPreferencesKey("password")
         private val INSECURE_TLS = booleanPreferencesKey("insecure_tls")
         private val AUTO_RECONNECT = booleanPreferencesKey("auto_reconnect")
+        private val KILL_SWITCH = booleanPreferencesKey("kill_switch")
         private val APP_FILTER_MODE = stringPreferencesKey("app_filter_mode")
         private val FILTERED_APPS = stringSetPreferencesKey("filtered_apps")
     }
@@ -44,6 +46,7 @@ class VpnSettingsRepository(private val context: Context) {
             password = prefs[PASSWORD] ?: "",
             insecureTls = prefs[INSECURE_TLS] ?: false,
             autoReconnect = prefs[AUTO_RECONNECT] ?: true,
+            killSwitch = prefs[KILL_SWITCH] ?: true,
             appFilterMode = try {
                 AppFilterMode.valueOf(prefs[APP_FILTER_MODE] ?: "ALL")
             } catch (_: Exception) {
@@ -60,6 +63,7 @@ class VpnSettingsRepository(private val context: Context) {
             prefs[PASSWORD] = profile.password
             prefs[INSECURE_TLS] = profile.insecureTls
             prefs[AUTO_RECONNECT] = profile.autoReconnect
+            prefs[KILL_SWITCH] = profile.killSwitch
             prefs[APP_FILTER_MODE] = profile.appFilterMode.name
             prefs[FILTERED_APPS] = profile.filteredApps
         }

@@ -66,7 +66,7 @@ class WsvpnClient(
 
     init {
         val builder = OkHttpClient.Builder()
-            .pingInterval(25, TimeUnit.SECONDS)
+            .pingInterval(15, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
             .connectTimeout(15, TimeUnit.SECONDS)
 

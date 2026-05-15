@@ -28,6 +28,8 @@ fun ConnectScreen(
 
     val isConnected = state.vpnState is WsvpnService.VpnState.Connected
     val isConnecting = state.vpnState is WsvpnService.VpnState.Connecting
+    val isReconnecting = state.vpnState is WsvpnService.VpnState.Reconnecting
+    val isActive = isConnected || isConnecting || isReconnecting
 
     Column(
         modifier = Modifier
@@ -51,6 +53,7 @@ fun ConnectScreen(
                 containerColor = when (state.vpnState) {
                     is WsvpnService.VpnState.Connected -> MaterialTheme.colorScheme.primaryContainer
                     is WsvpnService.VpnState.Connecting -> MaterialTheme.colorScheme.secondaryContainer
+                    is WsvpnService.VpnState.Reconnecting -> MaterialTheme.colorScheme.secondaryContainer
                     is WsvpnService.VpnState.Error -> MaterialTheme.colorScheme.errorContainer
                     is WsvpnService.VpnState.Disconnected -> MaterialTheme.colorScheme.surfaceVariant
                 }
@@ -64,6 +67,7 @@ fun ConnectScreen(
                     imageVector = when (state.vpnState) {
                         is WsvpnService.VpnState.Connected -> Icons.Default.CheckCircle
                         is WsvpnService.VpnState.Connecting -> Icons.Default.Sync
+                        is WsvpnService.VpnState.Reconnecting -> Icons.Default.Sync
                         is WsvpnService.VpnState.Error -> Icons.Default.Error
                         is WsvpnService.VpnState.Disconnected -> Icons.Default.CloudOff
                     },
@@ -73,9 +77,10 @@ fun ConnectScreen(
                 Spacer(modifier = Modifier.width(12.dp))
                 Column {
                     Text(
-                        text = when (val s = state.vpnState) {
+                        text = when (state.vpnState) {
                             is WsvpnService.VpnState.Connected -> "Connected"
                             is WsvpnService.VpnState.Connecting -> "Connecting..."
+                            is WsvpnService.VpnState.Reconnecting -> "Reconnecting..."
                             is WsvpnService.VpnState.Error -> "Error"
                             is WsvpnService.VpnState.Disconnected -> "Disconnected"
                         },
@@ -85,11 +90,19 @@ fun ConnectScreen(
                         is WsvpnService.VpnState.Connected -> {
                             Text("IP: ${s.clientIp}", style = MaterialTheme.typography.bodySmall)
                         }
+                        is WsvpnService.VpnState.Reconnecting -> {
+                            Text(
+                                "Attempt ${s.attempt} — traffic blocked",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
                         is WsvpnService.VpnState.Error -> {
                             Text(s.message, style = MaterialTheme.typography.bodySmall)
                         }
                         is WsvpnService.VpnState.Disconnected -> {
-                            if (s.reason.isNotEmpty()) {
+                            if (s.killSwitchActive) {
+                                Text("Traffic blocked by kill-switch", style = MaterialTheme.typography.bodySmall)
+                            } else if (s.reason.isNotEmpty()) {
                                 Text(s.reason, style = MaterialTheme.typography.bodySmall)
                             }
                         }
@@ -109,7 +122,7 @@ fun ConnectScreen(
             placeholder = { Text("wss://example.com:9000") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
-            enabled = !isConnected && !isConnecting,
+            enabled = !isActive,
             leadingIcon = { Icon(Icons.Default.Dns, contentDescription = null) },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
         )
@@ -123,7 +136,7 @@ fun ConnectScreen(
             label = { Text("Username") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
-            enabled = !isConnected && !isConnecting,
+            enabled = !isActive,
             leadingIcon = { Icon(Icons.Default.Person, contentDescription = null) }
         )
 
@@ -136,7 +149,7 @@ fun ConnectScreen(
             label = { Text("Password") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
-            enabled = !isConnected && !isConnecting,
+            enabled = !isActive,
             leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null) },
             visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
             trailingIcon = {
@@ -155,7 +168,7 @@ fun ConnectScreen(
         // Connect/Disconnect button
         Button(
             onClick = {
-                if (isConnected || isConnecting) {
+                if (isActive) {
                     onDisconnect()
                 } else {
                     onConnect()
@@ -164,21 +177,22 @@ fun ConnectScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(56.dp),
-            enabled = (isConnected || isConnecting) || state.profile.serverUrl.isNotBlank(),
-            colors = if (isConnected || isConnecting) {
+            enabled = isActive || state.profile.serverUrl.isNotBlank(),
+            colors = if (isActive) {
                 ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
             } else {
                 ButtonDefaults.buttonColors()
             }
         ) {
             Icon(
-                imageVector = if (isConnected || isConnecting) Icons.Default.LinkOff else Icons.Default.Link,
+                imageVector = if (isActive) Icons.Default.LinkOff else Icons.Default.Link,
                 contentDescription = null
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = when {
                     isConnecting -> "Cancel"
+                    isReconnecting -> "Disconnect"
                     isConnected -> "Disconnect"
                     else -> "Connect"
                 },
