@@ -225,17 +225,21 @@ class WsvpnService : VpnService() {
                     Log.d(TAG, "Ignoring stale onDisconnected (session $mySession, current ${sessionId.get()}): $reason")
                     return
                 }
-                val wasError = currentState is VpnState.Error
+                // Error state is only ever set for fatal errors now (see onError); a
+                // transient WebSocket failure leaves us in Connecting/Connected and
+                // will flow into the normal auto-reconnect path below.
+                val hadFatalError = currentState is VpnState.Error
                 val prof = profile
                 val killSwitch = prof?.killSwitch ?: false
-                val shouldReconnect = prof?.autoReconnect == true && !wasError
+                val shouldReconnect = prof?.autoReconnect == true && !hadFatalError
 
                 // With kill-switch: keep TUN up so apps see no connectivity instead of
                 // leaking to the underlying network. Packets keep being read but are
                 // dropped at sendDataPacket() because the WS is not initialized.
-                // Without kill-switch, or on a fatal Error: tear down TUN so the system
-                // VPN indicator and routing reflect reality.
-                val keepTunUp = killSwitch && !wasError
+                // On a fatal error: tear down TUN so the system VPN indicator and
+                // routing reflect reality and the user can use the network normally
+                // while they fix the credentials/config.
+                val keepTunUp = killSwitch && !hadFatalError
                 if (!keepTunUp) {
                     tunReadJob?.cancel()
                     tunReadJob = null
@@ -267,21 +271,36 @@ class WsvpnService : VpnService() {
                             startVpn()
                         }
                     }
-                } else if (killSwitch && !wasError) {
+                } else if (killSwitch && !hadFatalError) {
                     // Kill-switch on, no auto-reconnect: keep TUN up, block traffic,
                     // wait for user to manually reconnect or disconnect.
                     updateState(VpnState.Disconnected(reason, killSwitchActive = true))
                     updateNotification("Disconnected — traffic blocked by kill-switch")
+                } else if (hadFatalError) {
+                    // Fatal error (bad creds, protocol mismatch, malformed server data):
+                    // keep the service alive so the user can fix the problem and
+                    // reconnect from the UI without re-launching the app. Notification
+                    // stays as the user-visible error indicator; state is already Error.
+                    val errMsg = (currentState as? VpnState.Error)?.message ?: reason
+                    updateNotification("Error: $errMsg")
+                    Log.i(TAG, "Fatal error — service staying alive for user action")
                 } else {
                     updateState(VpnState.Disconnected(reason))
                     stopSelf()
                 }
             }
 
-            override fun onError(error: String) {
+            override fun onError(error: String, fatal: Boolean) {
                 if (mySession != sessionId.get()) return
-                Log.e(TAG, "WsvpnClient error: $error")
-                updateState(VpnState.Error(error))
+                Log.e(TAG, "WsvpnClient error (fatal=$fatal): $error")
+                if (fatal) {
+                    updateState(VpnState.Error(error))
+                } else {
+                    // Transient — don't move to Error state. The following onDisconnected
+                    // will drive Reconnecting via the normal auto-reconnect path; show a
+                    // hint in the notification in the meantime.
+                    updateNotification("Connection lost: $error")
+                }
             }
         })
 

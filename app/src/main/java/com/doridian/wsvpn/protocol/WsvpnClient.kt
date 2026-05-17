@@ -31,7 +31,10 @@ class WsvpnClient(
         fun onDataPacket(packet: ByteArray)
         fun onConnected()
         fun onDisconnected(reason: String)
-        fun onError(error: String)
+        // fatal=true → unrecoverable (bad creds, protocol mismatch, malformed server data);
+        // service should stop retrying. fatal=false → transient (network blip, handshake
+        // timeout); service should let auto-reconnect handle it.
+        fun onError(error: String, fatal: Boolean)
     }
 
     data class WsvpnConfig(
@@ -105,11 +108,11 @@ class WsvpnClient(
 
     fun connect() {
         if (config.serverUrl.isBlank()) {
-            listener.onError("Server URL is empty")
+            listener.onError("Server URL is empty", fatal = true)
             return
         }
         if (!config.serverUrl.startsWith("ws://") && !config.serverUrl.startsWith("wss://")) {
-            listener.onError("Server URL must start with ws:// or wss://")
+            listener.onError("Server URL must start with ws:// or wss://", fatal = true)
             return
         }
 
@@ -132,7 +135,7 @@ class WsvpnClient(
                 override fun run() {
                     if (!initialized) {
                         Log.w(TAG, "Connection timeout")
-                        listener.onError("Connection timed out")
+                        listener.onError("Connection timed out", fatal = false)
                         disconnect()
                     }
                 }
@@ -190,7 +193,7 @@ class WsvpnClient(
         Log.i(TAG, "Server version: ${params.version}, protocol: ${params.protocolVersion}")
 
         if (params.protocolVersion != PROTOCOL_VERSION) {
-            listener.onError("Protocol version mismatch: server=${params.protocolVersion}, client=$PROTOCOL_VERSION")
+            listener.onError("Protocol version mismatch: server=${params.protocolVersion}, client=$PROTOCOL_VERSION", fatal = true)
             disconnect()
             return
         }
@@ -207,7 +210,7 @@ class WsvpnClient(
 
         if (params.mode != "TUN") {
             sendCommand(WsvpnCommand.reply(cmd.id, "Unsupported mode: ${params.mode}"))
-            listener.onError("Unsupported mode: ${params.mode}. Only TUN is supported on Android.")
+            listener.onError("Unsupported mode: ${params.mode}. Only TUN is supported on Android.", fatal = true)
             disconnect()
             return
         }
@@ -215,14 +218,14 @@ class WsvpnClient(
         // Validate IP address format
         if (params.ipAddress.isBlank()) {
             sendCommand(WsvpnCommand.reply(cmd.id, "Empty IP address"))
-            listener.onError("Server sent empty IP address")
+            listener.onError("Server sent empty IP address", fatal = true)
             disconnect()
             return
         }
         val ipParts = params.ipAddress.split("/")
         if (ipParts.size != 2) {
             sendCommand(WsvpnCommand.reply(cmd.id, "Invalid IP address format"))
-            listener.onError("Invalid IP address format: ${params.ipAddress} (expected CIDR notation)")
+            listener.onError("Invalid IP address format: ${params.ipAddress} (expected CIDR notation)", fatal = true)
             disconnect()
             return
         }
@@ -230,14 +233,14 @@ class WsvpnClient(
             InetAddress.getByName(ipParts[0])
         } catch (e: Exception) {
             sendCommand(WsvpnCommand.reply(cmd.id, "Invalid IP address"))
-            listener.onError("Invalid IP address: ${ipParts[0]}")
+            listener.onError("Invalid IP address: ${ipParts[0]}", fatal = true)
             disconnect()
             return
         }
         val prefixLen = ipParts[1].toIntOrNull()
         if (prefixLen == null || prefixLen < 0 || prefixLen > 32) {
             sendCommand(WsvpnCommand.reply(cmd.id, "Invalid prefix length"))
-            listener.onError("Invalid prefix length: ${ipParts[1]}")
+            listener.onError("Invalid prefix length: ${ipParts[1]}", fatal = true)
             disconnect()
             return
         }
@@ -245,7 +248,7 @@ class WsvpnClient(
         // Validate MTU
         if (params.mtu < 576 || params.mtu > 65535) {
             sendCommand(WsvpnCommand.reply(cmd.id, "MTU out of range"))
-            listener.onError("MTU out of valid range (576-65535): ${params.mtu}")
+            listener.onError("MTU out of valid range (576-65535): ${params.mtu}", fatal = true)
             disconnect()
             return
         }
@@ -320,7 +323,7 @@ class WsvpnClient(
             replyErrors[cmd.id] = error
             // If the server rejects our version, disconnect
             if (!initialized) {
-                listener.onError("Server rejected handshake: $error")
+                listener.onError("Server rejected handshake: $error", fatal = true)
                 disconnect()
                 return
             }
@@ -339,7 +342,7 @@ class WsvpnClient(
 
             // Check for auth failure
             if (response.code == 401 || response.code == 403) {
-                listener.onError("Authentication failed (HTTP ${response.code})")
+                listener.onError("Authentication failed (HTTP ${response.code})", fatal = true)
                 disconnect()
                 return
             }
@@ -347,7 +350,7 @@ class WsvpnClient(
             // Check command serialization header
             val serialization = response.header("Command-Serialization")
             if (serialization != null && serialization != "json") {
-                listener.onError("Unsupported serialization: $serialization")
+                listener.onError("Unsupported serialization: $serialization", fatal = true)
                 disconnect()
                 return
             }
@@ -405,12 +408,16 @@ class WsvpnClient(
             handshakeTimer = null
             connected = false
             initialized = false
+            // 401/403 = bad creds → fatal (retrying won't help). Anything else
+            // (TCP reset, TLS handshake, idle close, DNS, etc.) is transient and
+            // should be retried by the service's auto-reconnect.
+            val fatal = response?.code == 401 || response?.code == 403
             val errorMsg = when (response?.code) {
                 401 -> "Authentication failed: invalid credentials"
                 403 -> "Authentication failed: access denied"
                 else -> t.message ?: "Connection failed"
             }
-            listener.onError(errorMsg)
+            listener.onError(errorMsg, fatal = fatal)
             listener.onDisconnected(errorMsg)
         }
     }
