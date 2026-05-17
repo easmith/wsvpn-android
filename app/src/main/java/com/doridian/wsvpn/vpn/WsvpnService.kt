@@ -6,6 +6,10 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -42,6 +46,7 @@ class WsvpnService : VpnService() {
         const val EXTRA_INSECURE_TLS = "insecure_tls"
         const val EXTRA_AUTO_RECONNECT = "auto_reconnect"
         const val EXTRA_KILL_SWITCH = "kill_switch"
+        const val EXTRA_KEEPALIVE_SECONDS = "keepalive_seconds"
         const val EXTRA_APP_FILTER_MODE = "app_filter_mode"
         const val EXTRA_FILTERED_APPS = "filtered_apps"
 
@@ -74,6 +79,12 @@ class WsvpnService : VpnService() {
     private var server: VpnServer? = null
     private var reconnectAttempt = 0
 
+    // Track underlying (non-VPN) networks so we don't burn radio retrying while
+    // offline. The set is keyed by Network handle; emptiness == no usable network.
+    private val activeNetworks = mutableSetOf<Network>()
+    @Volatile private var networkAvailable = true
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
     // Bumped on every session boundary (start / stop). Each WsvpnClient listener
     // captures the session it was created for and ignores callbacks that arrive
     // after the session has been replaced — guards against an old client's async
@@ -83,6 +94,7 @@ class WsvpnService : VpnService() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        registerNetworkCallback()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -125,6 +137,7 @@ class WsvpnService : VpnService() {
                 val insecureTls = intent.getBooleanExtra(EXTRA_INSECURE_TLS, false)
                 val autoReconnect = intent.getBooleanExtra(EXTRA_AUTO_RECONNECT, true)
                 val killSwitch = intent.getBooleanExtra(EXTRA_KILL_SWITCH, true)
+                val keepalive = intent.getIntExtra(EXTRA_KEEPALIVE_SECONDS, 30)
                 val filterMode = intent.getStringExtra(EXTRA_APP_FILTER_MODE) ?: "ALL"
                 val filteredApps = intent.getStringArrayExtra(EXTRA_FILTERED_APPS)?.toSet() ?: emptySet()
 
@@ -139,6 +152,7 @@ class WsvpnService : VpnService() {
                     insecureTls = insecureTls,
                     autoReconnect = autoReconnect,
                     killSwitch = killSwitch,
+                    keepaliveSeconds = keepalive,
                     appFilterMode = AppFilterMode.valueOf(filterMode),
                     filteredApps = filteredApps
                 )
@@ -165,6 +179,7 @@ class WsvpnService : VpnService() {
     override fun onDestroy() {
         stopVpn("Service destroyed")
         setActiveServerId(null)
+        unregisterNetworkCallback()
         scope.cancel()
         super.onDestroy()
     }
@@ -181,7 +196,8 @@ class WsvpnService : VpnService() {
             serverUrl = srv.serverUrl,
             username = srv.username,
             password = srv.password,
-            insecureTls = prof.insecureTls
+            insecureTls = prof.insecureTls,
+            keepaliveSeconds = prof.keepaliveSeconds
         )
 
         wsvpnClient = WsvpnClient(config, vpnService = this, listener = object : WsvpnClient.WsvpnListener {
@@ -265,6 +281,17 @@ class WsvpnService : VpnService() {
                     reconnectJob?.cancel()
                     reconnectJob = scope.launch {
                         delay(delayMs)
+                        if (!networkAvailable) {
+                            // Don't burn radio retrying with no network — sit idle and
+                            // let onAvailable fire startVpn() the moment connectivity
+                            // comes back. reconnectAttempt is preserved.
+                            Log.i(TAG, "No underlying network; deferring reconnect")
+                            updateNotification(
+                                if (killSwitch) "Waiting for network — traffic blocked"
+                                else "Waiting for network..."
+                            )
+                            return@launch
+                        }
                         val st = currentState
                         if (st is VpnState.Disconnected || st is VpnState.Reconnecting) {
                             Log.i(TAG, "Auto-reconnecting...")
@@ -466,6 +493,83 @@ class WsvpnService : VpnService() {
     private fun updateState(state: VpnState) {
         currentState = state
         stateListener?.invoke(state, activeServerId)
+    }
+
+    private fun registerNetworkCallback() {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        // Track underlying (non-VPN) internet networks. Once our VPN is up the
+        // system default network is *us*, so we must filter to NOT_VPN to keep
+        // watching the real link underneath.
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            .build()
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                val becameAvailable: Boolean
+                synchronized(activeNetworks) {
+                    val wasEmpty = activeNetworks.isEmpty()
+                    activeNetworks.add(network)
+                    networkAvailable = activeNetworks.isNotEmpty()
+                    becameAvailable = wasEmpty && networkAvailable
+                }
+                Log.i(TAG, "Network available: $network (total=${activeNetworks.size})")
+                if (becameAvailable) onNetworkRestored()
+            }
+
+            override fun onLost(network: Network) {
+                synchronized(activeNetworks) {
+                    activeNetworks.remove(network)
+                    networkAvailable = activeNetworks.isNotEmpty()
+                }
+                Log.i(TAG, "Network lost: $network (remaining=${activeNetworks.size})")
+            }
+        }
+        try {
+            cm.registerNetworkCallback(request, cb)
+            networkCallback = cb
+            // Seed availability synchronously so the first connect attempt doesn't
+            // race the first onAvailable callback.
+            @Suppress("DEPRECATION")
+            val all = cm.allNetworks
+            networkAvailable = all.any { n ->
+                val caps = cm.getNetworkCapabilities(n)
+                caps != null &&
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to register network callback", e)
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        networkCallback?.let {
+            try { cm.unregisterNetworkCallback(it) } catch (_: Exception) {}
+        }
+        networkCallback = null
+        activeNetworks.clear()
+    }
+
+    /**
+     * Called when underlying connectivity comes back. If we have a pending
+     * auto-reconnect (state is Reconnecting/Disconnected and autoReconnect is on),
+     * cancel the backoff wait and fire startVpn() immediately.
+     */
+    private fun onNetworkRestored() {
+        val prof = profile ?: return
+        val srv = server ?: return
+        if (!prof.autoReconnect) return
+        if (srv.serverUrl.isBlank()) return
+        val st = currentState
+        val shouldKick = st is VpnState.Reconnecting || st is VpnState.Disconnected
+        if (!shouldKick) return
+        Log.i(TAG, "Network restored; firing pending reconnect")
+        reconnectJob?.cancel()
+        reconnectJob = scope.launch {
+            startVpn()
+        }
     }
 
     private fun setActiveServerId(id: String?) {

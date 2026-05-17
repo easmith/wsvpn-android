@@ -17,6 +17,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 
+private val KEEPALIVE_OPTIONS = listOf(15, 30, 60, 120)
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(viewModel: MainViewModel) {
     val profile by viewModel.profile.collectAsState()
@@ -61,6 +64,35 @@ fun SettingsScreen(viewModel: MainViewModel) {
                         checked = profile.autoReconnect,
                         onCheckedChange = { viewModel.updateAutoReconnect(it) }
                     )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Text("Keepalive interval")
+                Text(
+                    "Lower = faster disconnect detection. Higher = better battery. " +
+                        "Raise this if it's bothering you.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                val selectedIndex = KEEPALIVE_OPTIONS.indexOf(profile.keepaliveSeconds)
+                    .let { if (it < 0) 1 else it } // fall back to 30s if out-of-list
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    KEEPALIVE_OPTIONS.forEachIndexed { index, seconds ->
+                        SegmentedButton(
+                            selected = index == selectedIndex,
+                            onClick = { viewModel.updateKeepaliveSeconds(seconds) },
+                            shape = SegmentedButtonDefaults.itemShape(
+                                index = index,
+                                count = KEEPALIVE_OPTIONS.size
+                            )
+                        ) {
+                            Text("${seconds}s")
+                        }
+                    }
                 }
             }
         }

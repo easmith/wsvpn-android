@@ -117,6 +117,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         scheduleSave()
     }
 
+    fun updateKeepaliveSeconds(seconds: Int) {
+        _profile.update { it.copy(keepaliveSeconds = seconds.coerceIn(15, 300)) }
+        scheduleSave()
+    }
+
     fun updateAppFilterMode(mode: AppFilterMode) {
         _profile.update { it.copy(appFilterMode = mode) }
         scheduleSave()
@@ -180,6 +185,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 putExtra(WsvpnService.EXTRA_INSECURE_TLS, profile.insecureTls)
                 putExtra(WsvpnService.EXTRA_AUTO_RECONNECT, profile.autoReconnect)
                 putExtra(WsvpnService.EXTRA_KILL_SWITCH, profile.killSwitch)
+                putExtra(WsvpnService.EXTRA_KEEPALIVE_SECONDS, profile.keepaliveSeconds)
                 putExtra(WsvpnService.EXTRA_APP_FILTER_MODE, profile.appFilterMode.name)
                 putExtra(WsvpnService.EXTRA_FILTERED_APPS, profile.filteredApps.toTypedArray())
             }

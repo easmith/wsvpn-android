@@ -41,7 +41,10 @@ class WsvpnClient(
         val serverUrl: String,
         val username: String = "",
         val password: String = "",
-        val insecureTls: Boolean = false
+        val insecureTls: Boolean = false,
+        // WebSocket ping interval. Lower = faster dead-peer detection but more
+        // radio wake-ups (battery). 30s is a reasonable default for typical NATs.
+        val keepaliveSeconds: Int = 30
     )
 
     private var webSocket: WebSocket? = null
@@ -68,8 +71,9 @@ class WsvpnClient(
     }
 
     init {
+        val pingSeconds = config.keepaliveSeconds.coerceIn(15, 300).toLong()
         val builder = OkHttpClient.Builder()
-            .pingInterval(15, TimeUnit.SECONDS)
+            .pingInterval(pingSeconds, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
             .connectTimeout(15, TimeUnit.SECONDS)
 
