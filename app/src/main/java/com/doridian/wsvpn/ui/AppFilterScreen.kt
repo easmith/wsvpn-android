@@ -1,5 +1,6 @@
 package com.doridian.wsvpn.ui
 
+import android.graphics.drawable.Drawable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -13,9 +14,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.doridian.wsvpn.data.AppFilterMode
 import com.google.accompanist.drawablepainter.rememberDrawablePainter
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -180,19 +184,10 @@ fun AppFilterScreen(viewModel: MainViewModel) {
                             )
                         },
                         leadingContent = {
-                            if (app.icon != null) {
-                                Image(
-                                    painter = rememberDrawablePainter(app.icon),
-                                    contentDescription = null,
-                                    modifier = Modifier.size(40.dp)
-                                )
-                            } else {
-                                Icon(
-                                    Icons.Default.Apps,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(40.dp)
-                                )
-                            }
+                            AppIcon(
+                                packageName = app.packageName,
+                                modifier = Modifier.size(40.dp)
+                            )
                         },
                         trailingContent = {
                             Checkbox(
@@ -205,5 +200,36 @@ fun AppFilterScreen(viewModel: MainViewModel) {
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun AppIcon(packageName: String, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    // Load on demand for the row currently scrolled into view; LazyColumn keeps the
+    // composition around its window, so the icon stays cached while visible and is
+    // dropped (along with its Drawable) once the row scrolls off-screen.
+    val icon by produceState<Drawable?>(initialValue = null, packageName) {
+        value = withContext(Dispatchers.IO) {
+            try {
+                context.packageManager.getApplicationIcon(packageName)
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+    val drawable = icon
+    if (drawable != null) {
+        Image(
+            painter = rememberDrawablePainter(drawable),
+            contentDescription = null,
+            modifier = modifier
+        )
+    } else {
+        Icon(
+            Icons.Default.Apps,
+            contentDescription = null,
+            modifier = modifier
+        )
     }
 }

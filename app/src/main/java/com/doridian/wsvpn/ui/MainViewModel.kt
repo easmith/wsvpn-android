@@ -3,8 +3,6 @@ package com.doridian.wsvpn.ui
 import android.app.Application
 import android.content.Intent
 import android.content.pm.ApplicationInfo
-import android.content.pm.PackageManager
-import android.graphics.drawable.Drawable
 import android.net.VpnService
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -28,7 +26,6 @@ import java.util.UUID
 data class AppInfo(
     val packageName: String,
     val label: String,
-    val icon: Drawable?,
     val isSystemApp: Boolean
 )
 
@@ -155,12 +152,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val apps = withContext(Dispatchers.IO) {
                 val pm = getApplication<Application>().packageManager
-                pm.getInstalledApplications(PackageManager.GET_META_DATA)
+                // Icons used to be loaded here eagerly for every installed app — on
+                // devices with 200+ apps that was tens of MB of Drawable allocations
+                // up-front. Icons now load lazily per visible row (see AppIcon in
+                // AppFilterScreen). GET_META_DATA isn't needed for label/flags either.
+                pm.getInstalledApplications(0)
                     .map { appInfo ->
                         AppInfo(
                             packageName = appInfo.packageName,
                             label = appInfo.loadLabel(pm).toString(),
-                            icon = try { appInfo.loadIcon(pm) } catch (_: Exception) { null },
                             isSystemApp = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
                         )
                     }

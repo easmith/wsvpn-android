@@ -15,13 +15,74 @@ import javax.net.SocketFactory
 
 class WsvpnClient(
     private val config: WsvpnConfig,
-    private val listener: WsvpnListener,
-    private val vpnService: VpnService? = null
+    private val listener: WsvpnListener
 ) {
     companion object {
         private const val TAG = "WsvpnClient"
         const val PROTOCOL_VERSION = 12
         const val APP_VERSION = "wsvpn-android 1.0.0"
+
+        // Each WsvpnClient used to build its own OkHttpClient — that meant a fresh
+        // Dispatcher (with executor service) and ConnectionPool per reconnect, both
+        // of which kept idle threads alive for ~60s after disconnect. With a flapping
+        // network they piled up. We now share a single base client per TLS variant
+        // and use newBuilder() to override pingInterval per instance — newBuilder
+        // shares dispatcher, connection pool and sockets with the parent, so the
+        // derived client is essentially free.
+        @Volatile private var sharedSecureClient: OkHttpClient? = null
+        @Volatile private var sharedInsecureClient: OkHttpClient? = null
+
+        // Set by WsvpnService for its lifetime. The shared SocketFactory reads it to
+        // protect each freshly-created socket from the VPN's own routing — the same
+        // role the per-instance rawSocket + protectSocket() pair used to play, but
+        // applied at socket-creation time so even retries during connect are covered.
+        @Volatile var currentVpnService: VpnService? = null
+
+        private fun baseClient(insecureTls: Boolean): OkHttpClient {
+            val cached = if (insecureTls) sharedInsecureClient else sharedSecureClient
+            if (cached != null) return cached
+            return synchronized(this) {
+                val existing = if (insecureTls) sharedInsecureClient else sharedSecureClient
+                existing ?: buildBaseClient(insecureTls).also {
+                    if (insecureTls) sharedInsecureClient = it else sharedSecureClient = it
+                }
+            }
+        }
+
+        private fun buildBaseClient(insecureTls: Boolean): OkHttpClient {
+            val builder = OkHttpClient.Builder()
+                .readTimeout(0, TimeUnit.MILLISECONDS)
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .socketFactory(VpnAwareSocketFactory)
+
+            if (insecureTls) {
+                val trustAllCerts = arrayOf<javax.net.ssl.TrustManager>(
+                    object : javax.net.ssl.X509TrustManager {
+                        override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
+                        override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
+                        override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+                    }
+                )
+                val sslContext = javax.net.ssl.SSLContext.getInstance("TLS")
+                sslContext.init(null, trustAllCerts, java.security.SecureRandom())
+                builder.sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as javax.net.ssl.X509TrustManager)
+                builder.hostnameVerifier { _, _ -> true }
+            }
+
+            return builder.build()
+        }
+
+        private object VpnAwareSocketFactory : SocketFactory() {
+            override fun createSocket(): Socket {
+                val s = Socket()
+                currentVpnService?.protect(s)
+                return s
+            }
+            override fun createSocket(host: String, port: Int): Socket = throw UnsupportedOperationException()
+            override fun createSocket(host: String, port: Int, a: InetAddress, b: Int): Socket = throw UnsupportedOperationException()
+            override fun createSocket(host: InetAddress, port: Int): Socket = throw UnsupportedOperationException()
+            override fun createSocket(host: InetAddress, port: Int, a: InetAddress, b: Int): Socket = throw UnsupportedOperationException()
+        }
     }
 
     interface WsvpnListener {
@@ -58,56 +119,14 @@ class WsvpnClient(
     @Volatile private var connected = false
     @Volatile private var initialized = false
     private var handshakeTimer: java.util.Timer? = null
-    private var rawSocket: Socket? = null
-
-    /**
-     * Protect the underlying socket from VPN routing.
-     * Must be called after VpnService.establish() for protect() to succeed.
-     */
-    fun protectSocket(): Boolean {
-        val socket = rawSocket ?: return false
-        val service = vpnService ?: return false
-        return service.protect(socket)
-    }
 
     init {
         val pingSeconds = config.keepaliveSeconds.coerceIn(15, 300).toLong()
-        val builder = OkHttpClient.Builder()
+        // newBuilder() inherits dispatcher, connection pool, sockets, etc — only
+        // the per-instance pingInterval is layered on top, so this is cheap.
+        client = baseClient(config.insecureTls).newBuilder()
             .pingInterval(pingSeconds, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.MILLISECONDS)
-            .connectTimeout(15, TimeUnit.SECONDS)
-
-        // Protect sockets from VPN routing to avoid routing loops.
-        // Note: protect() only works after VPN is established, so we also
-        // rely on addDisallowedApplication + route exclusion as primary mechanisms.
-        // This SocketFactory stores the socket so we can protect it after establish().
-        if (vpnService != null) {
-            builder.socketFactory(object : SocketFactory() {
-                override fun createSocket(): Socket {
-                    return Socket().also { rawSocket = it }
-                }
-                override fun createSocket(host: String, port: Int) = throw UnsupportedOperationException()
-                override fun createSocket(host: String, port: Int, a: InetAddress, b: Int) = throw UnsupportedOperationException()
-                override fun createSocket(host: InetAddress, port: Int) = throw UnsupportedOperationException()
-                override fun createSocket(host: InetAddress, port: Int, a: InetAddress, b: Int) = throw UnsupportedOperationException()
-            })
-        }
-
-        if (config.insecureTls) {
-            val trustAllCerts = arrayOf<javax.net.ssl.TrustManager>(
-                object : javax.net.ssl.X509TrustManager {
-                    override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
-                    override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
-                    override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
-                }
-            )
-            val sslContext = javax.net.ssl.SSLContext.getInstance("TLS")
-            sslContext.init(null, trustAllCerts, java.security.SecureRandom())
-            builder.sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as javax.net.ssl.X509TrustManager)
-            builder.hostnameVerifier { _, _ -> true }
-        }
-
-        client = builder.build()
+            .build()
     }
 
     fun connect() {

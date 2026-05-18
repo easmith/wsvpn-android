@@ -95,6 +95,9 @@ class WsvpnService : VpnService() {
         super.onCreate()
         createNotificationChannel()
         registerNetworkCallback()
+        // Lets the shared OkHttp SocketFactory call protect() on every socket it
+        // creates without WsvpnClient needing a direct VpnService reference.
+        WsvpnClient.currentVpnService = this
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -181,6 +184,7 @@ class WsvpnService : VpnService() {
         setActiveServerId(null)
         unregisterNetworkCallback()
         scope.cancel()
+        WsvpnClient.currentVpnService = null
         super.onDestroy()
     }
 
@@ -200,7 +204,7 @@ class WsvpnService : VpnService() {
             keepaliveSeconds = prof.keepaliveSeconds
         )
 
-        wsvpnClient = WsvpnClient(config, vpnService = this, listener = object : WsvpnClient.WsvpnListener {
+        wsvpnClient = WsvpnClient(config, listener = object : WsvpnClient.WsvpnListener {
             override fun onInitReceived(params: InitParameters) {
                 if (mySession != sessionId.get()) return
                 scope.launch {
@@ -419,8 +423,9 @@ class WsvpnService : VpnService() {
             ?: throw IllegalStateException("VPN interface creation failed - permission denied?")
         tunOutput = FileOutputStream(vpnInterface!!.fileDescriptor)
 
-        // Now that VPN is established, protect the WebSocket socket
-        wsvpnClient?.protectSocket()
+        // Socket protect() now happens inside the shared OkHttp SocketFactory at
+        // createSocket() time (see WsvpnClient.VpnAwareSocketFactory), so by the
+        // time we get here it's already protected.
 
         // Start reading from TUN
         startTunReader()
